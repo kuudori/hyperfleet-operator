@@ -1,0 +1,26 @@
+aliases:
+  observability-owners:
+  - pnguyen44
+  - kuudori
+  observability-reviewers:
+  - ldornele
+  - tirthct
+  - Ruclo
+  operator-owners:
+  - kuudori
+  operator-reviewers:
+  - tirthct
+  - ma-hill
+  - rafabene
+  - ldornele
+  - Ruclo
+  release-owners:
+  - ma-hill
+  - kuudori
+  release-reviewers:
+  - tirthct
+  - Mischulee
+  tech-leads:
+  - ciaranRoche
+  - rafabene
+  - rh-amarin
