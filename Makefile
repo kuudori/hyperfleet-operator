@@ -16,11 +16,8 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
-# CONTAINER_TOOL defines the container tool to be used for building images.
-# Be aware that the target commands are only tested with Docker which is
-# scaffolded by default. However, you might want to replace it to use other
-# tools. (i.e. podman)
-CONTAINER_TOOL ?= docker
+# Container tool (docker or podman)
+CONTAINER_TOOL ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -152,8 +149,8 @@ test-disconnected-mirror: build-oc-mirror-image ## Test catalog archive import u
 		./hack/test-disconnected-mirror.sh
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+build: ## Build manager binary.
+	CGO_ENABLED=$(CGO_ENABLED) GOEXPERIMENT=$(GOEXPERIMENT) GOFIPS140=$(GOFIPS140) go build $(GOFLAGS) -ldflags="-s -w -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.version=$(APP_VERSION) -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.commit=$(GIT_SHA)" -o bin/manager cmd/main.go
 
 # OPERATOR_NAMESPACE is the namespace the operator creates operands in. In-cluster
 # it comes from the downward API; for `make run` it defaults here so local dev works.
@@ -180,7 +177,7 @@ export RELATED_IMAGE_HYPERFLEET_API ?= quay.io/redhat-services-prod/hyperfleet-t
 
 # Base image for production builds - matches Dockerfile default
 # Override with DEV_BASE_IMAGE for dev builds (see image-dev target)
-BASE_IMAGE ?= registry.access.redhat.com/ubi9-micro:latest
+BASE_IMAGE ?= registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 APP_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.0.0-dev")
 GIT_SHA ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -191,11 +188,9 @@ GIT_DIRTY ?= $(shell [ -z "$$(git status --porcelain 2>/dev/null)" ] || echo "-m
 # Go build flags (FIPS compliant)
 CGO_ENABLED ?= 1
 GOEXPERIMENT ?= boringcrypto
+GOFIPS140 ?= off
 GOFLAGS ?= -trimpath
-# APP_VERSION/GIT_SHA are injected into the binary via the Dockerfile's own
-# -ldflags -X (see Dockerfile and internal/version); `make build`/`make run`
-# intentionally skip ldflags and rely on the Go toolchain's automatic VCS
-# stamping from the local .git checkout instead (see internal/version).
+# `make run` uses `go run` directly, so it won't embed APP_VERSION/GIT_SHA (see internal/version).
 
 .PHONY: check-container-tool
 check-container-tool:

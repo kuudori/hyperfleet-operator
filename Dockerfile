@@ -1,42 +1,42 @@
-ARG BASE_IMAGE=registry.access.redhat.com/ubi9-micro:latest
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 FROM registry.access.redhat.com/ubi9/go-toolset:9.8-1789040808 AS builder
 
-# APP_VERSION/GIT_SHA are injected into the binary below via -ldflags -X, so
-# hyperfleet_operator_build_info reports the real release/commit instead of
-# falling back to "dev"/"unknown" (see internal/version and docs/metrics.md).
-# The container build has no .git directory to source them from automatically,
-# unlike `make build`/`make run`, which get them from the toolchain's own VCS
-# stamping.
+# No .git in the build container, so APP_VERSION/GIT_SHA (embedded via
+# -ldflags -X in `make build`, see internal/version) arrive as build-args.
 ARG APP_VERSION="0.0.0-dev"
 ARG GIT_SHA="unknown"
 
+# Install make as root (UBI9 go-toolset doesn't include it), then switch back to non-root
 USER root
-WORKDIR /workspace
-# Copy the Go Modules manifests
-COPY go.mod go.mod
-COPY go.sum go.sum
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
-RUN go mod download
+RUN dnf install -y make && dnf clean all
+WORKDIR /build
+RUN chown 1001:0 /build
+USER 1001
 
-# Copy the go source
-COPY cmd/main.go cmd/main.go
-COPY api/ api/
-COPY internal/ internal/
+ENV GOBIN=/build/.gobin
+RUN mkdir -p $GOBIN
 
+COPY --chown=1001:0 go.mod go.sum ./
+RUN --mount=type=cache,target=/opt/app-root/src/go/pkg/mod,uid=1001 \
+    go mod download
 
-RUN CGO_ENABLED=1 GOEXPERIMENT=boringcrypto \
-    go build -trimpath -ldflags="-s -w \
-      -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.version=${APP_VERSION} \
-      -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.commit=${GIT_SHA}" \
-    -o manager ./cmd/main.go
+COPY --chown=1001:0 . .
+
+RUN --mount=type=cache,target=/opt/app-root/src/go/pkg/mod,uid=1001 \
+    --mount=type=cache,target=/opt/app-root/src/.cache/go-build,uid=1001 \
+    make build APP_VERSION=${APP_VERSION} GIT_SHA=${GIT_SHA}
+
+# Fail the build if the binary wasn't compiled with FIPS-compliant flags (see container-image-standard.md)
+RUN go version -m /build/bin/manager | grep -q "CGO_ENABLED=1" || { echo "FIPS check FAILED: missing CGO_ENABLED=1"; exit 1; }
+RUN go version -m /build/bin/manager | grep -q "GOEXPERIMENT=boringcrypto" || { echo "FIPS check FAILED: missing GOEXPERIMENT=boringcrypto"; exit 1; }
 
 # Runtime stage
 FROM ${BASE_IMAGE} AS final
 
 WORKDIR /
-COPY --from=builder /workspace/manager .
+COPY --from=builder /build/bin/manager .
+COPY --from=builder /build/LICENSE /licenses/LICENSE
 USER 65532:65532
 
 ARG APP_VERSION="0.0.0-dev"
