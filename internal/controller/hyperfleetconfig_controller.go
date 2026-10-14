@@ -154,21 +154,14 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}()
 
-	// Resolve the JWKS URL. When auth is on and the CR pins neither a JWKS URL nor
-	// a JWKS Secret, this performs OIDC discovery — a network read, so it lives
-	// here rather than in the pure renderer. Empty otherwise.
-	jwksURL, err := r.resolveJWKSURL(ctx, cr)
-	if err != nil {
-		metrics.IncReconcileError("discovery")
-		return ctrl.Result{}, fmt.Errorf("resolve JWKS URL: %w", err)
-	}
-
 	// Read each referenced Secret's resourceVersion for the rollout hash. A
 	// rotation bumps resourceVersion without changing the rendered config.yaml or
 	// the pod spec, so without hashing it the pods would keep running with stale
 	// credentials/certs. A missing Secret is not fatal here — it is hashed as
 	// absent so the pods roll once the Secret appears — but it does drive the
-	// Degraded condition via missingSecrets below.
+	// Degraded condition via missingSecrets below. This runs before OIDC discovery
+	// so a missing Secret still takes precedence in degradedCondition even when
+	// discovery also fails in the same reconcile.
 	secretData, err := r.referencedSecretData(ctx, cr)
 	if err != nil {
 		metrics.IncReconcileError("secrets")
@@ -178,6 +171,15 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if !e.present {
 			missingSecrets = append(missingSecrets, e.id)
 		}
+	}
+
+	// Resolve the JWKS URL. When auth is on and the CR pins neither a JWKS URL nor
+	// a JWKS Secret, this performs OIDC discovery — a network read, so it lives
+	// here rather than in the pure renderer. Empty otherwise.
+	jwksURL, err := r.resolveJWKSURL(ctx, cr)
+	if err != nil {
+		metrics.IncReconcileError("discovery")
+		return ctrl.Result{}, fmt.Errorf("resolve JWKS URL: %w", err)
 	}
 
 	components, err := bundle.Resolve(cr.Spec.Bundle, bundle.Config{

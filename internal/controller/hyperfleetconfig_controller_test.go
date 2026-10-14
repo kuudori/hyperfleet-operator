@@ -462,6 +462,31 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Message).To(ContainSubstring("database"))
 	})
 
+	It("reports Degraded=True with ReferencedSecretMissing, not ReconcileError, when OIDC discovery also fails with an empty cache", func() {
+		By("pointing auth at an issuer whose discovery endpoint fails, on a fresh install with an empty discovery cache")
+		badDiscovery := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		DeferCleanup(badDiscovery.Close)
+		reconciler.HTTPClient = badDiscovery.Client()
+
+		cr := getCR()
+		cr.Spec.API.Auth.JWKCertSecretRef = nil
+		cr.Spec.API.Auth.Issuer = badDiscovery.URL
+		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+
+		By("reconciling without creating the fixture's referenced database Secret, so both discovery and the Secret read fail")
+		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: typeNamespacedName})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("resolve JWKS URL"))
+
+		By("verifying the missing Secret takes precedence over the discovery failure")
+		cr = getCR()
+		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Status).To(Equal(metav1.ConditionTrue))
+		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Reason).To(Equal(hyperfleetv1alpha1.ReasonReferencedSecretMissing))
+		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Message).To(ContainSubstring("database"))
+	})
+
 	It("does not bump lastTransitionTime on a no-op reconcile", func() {
 		By("reconciling once to establish a baseline status")
 		doReconcile()
@@ -483,7 +508,7 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 		progressingBeforeFailure := conditionByType(cr, hyperfleetv1alpha1.ConditionProgressing)
 		observedGenerationBeforeFailure := cr.Status.ObservedGeneration
 
-		By("pointing auth at an issuer whose discovery endpoint fails, so OIDC discovery errors before referencedSecretData or any component ever runs")
+		By("pointing auth at an issuer whose discovery endpoint fails, so OIDC discovery errors before any component ever runs")
 		badDiscovery := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}))
