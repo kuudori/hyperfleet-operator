@@ -13,18 +13,23 @@ not duplicated here.
 
 ## Prerequisites
 
-- Go 1.26 or newer, matching `go.mod`.
+- Go 1.26.0, matching `go.mod` (the pinned golangci-lint does not support Go 1.27; on newer toolchains, prefix commands with `GOTOOLCHAIN=go1.26.0`).
 - Docker. The image and e2e targets are scaffolded and tested with Docker;
   alternative container tools are not assumed to work.
 - `envsubst` (provided by gettext) for development OLM bundle overlays.
 - `kubectl` and access to the cluster used for local runs.
 - `kind` for end-to-end tests.
+- [pre-commit](https://pre-commit.com/#install) for the repository git hooks.
 - Network access when tools, envtest assets, base images, or cert-manager must be
   downloaded.
 
 Repository tools such as `controller-gen`, `golangci-lint`, `kustomize`, and
 `setup-envtest` are pinned in `tools/go.mod` and invoked through `go tool`; a
 separate global installation is not required.
+
+Run `make install-hooks` once after cloning to install the git hooks (LeakTK
+secret scanning, commit message validation, Go tooling checks, and file
+hygiene), configured in `.pre-commit-config.yaml`.
 
 The current `.devcontainer/devcontainer.json` still selects Go 1.24 and does not
 meet the `go.mod` requirement. Until that file is upgraded, do not treat the
