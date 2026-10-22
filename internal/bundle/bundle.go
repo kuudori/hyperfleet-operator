@@ -28,12 +28,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
 	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/api"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/sentinel"
 )
 
-// Component is the contract every component satisfies. It is deliberately tiny —
-// render the desired objects, report health — with no extension points until a
-// second component exists to justify them.
+// Component is the contract every component satisfies.
 //
 //   - Render is a pure function (CR → desired objects); it must not read or write
 //     the cluster. The controller applies what it returns.
@@ -42,18 +42,30 @@ import (
 //     server's current status (see internal/apply). This avoids giving every
 //     component its own client.Client and an extra round of API reads for state
 //     the controller already has. Consumed starting in HYPERFLEET-1409.
+//   - Rollout tells the controller which ConfigMap and Deployment carry the
+//     component's config-hash annotation, so stampConfigHash works for any
+//     component without hardcoding names (HYPERFLEET-1673).
+//   - ReferencedSecrets declares which Secrets this component's pods consume,
+//     so the controller scopes each component's rollout hash to only the
+//     Secrets that are consumed by the component.
 type Component interface {
 	Name() string
 	Render(ctx context.Context, cr *hyperfleetv1alpha1.HyperFleetConfig) ([]client.Object, error)
 	Conditions(ctx context.Context, cr *hyperfleetv1alpha1.HyperFleetConfig, applied []client.Object) ([]metav1.Condition, error)
+	Rollout() component.RolloutTarget
+	ReferencedSecrets(cr *hyperfleetv1alpha1.HyperFleetConfig) []component.SecretReference
 }
 
 // Config carries the inputs the resolver needs to construct components.
 type Config struct {
 	// APIImage is the image for the API component (empty → its compiled-in default).
 	APIImage string
+	// SentinelImage is the image for the Sentinel component.
+	SentinelImage string
 	// Namespace is the operator's own namespace, where operands are created.
 	Namespace string
+	// BrokerInfo contains information about the Sentinel message broker backend.
+	BrokerInfo *sentinel.BrokerInfo
 	// ResolvedJWKSURL is the JWKS URL the controller derived via OIDC discovery.
 	// It is threaded through to the API component, which needs it only when auth
 	// is enabled and the CR pins neither a JWKS URL nor a JWKS Secret. Empty
@@ -120,20 +132,39 @@ func entitiesForBundle(b hyperfleetv1alpha1.BundleType) ([]api.EntityDescriptor,
 	}
 }
 
-// sharedTier lists the components present in every bundle regardless of flavor.
-// In phase 1 this is exactly [API], so every bundle resolves to [API]. It takes
-// the bundle so the API component can be given the bundle-specific entity set.
+// sharedTier lists the components present in every bundle regardless of
+// flavor: the API, plus one Sentinel instance per registered entity
+// (HYPERFLEET-1673 — Sentinel is the second bundle component). It takes the
+// bundle so both can be given the bundle-specific entity set.
 func sharedTier(b hyperfleetv1alpha1.BundleType, cfg Config) ([]Component, error) {
 	entities, err := entitiesForBundle(b)
 	if err != nil {
 		return nil, err
 	}
-	return []Component{
+
+	components := []Component{
 		api.New(cfg.APIImage, cfg.Namespace, api.Options{
-			Entities:        entities,
-			ResolvedJWKSURL: cfg.ResolvedJWKSURL,
+			Entities: entities,
 		}),
-	}, nil
+	}
+
+	apiBaseUrl := api.ServiceURL(cfg.Namespace)
+	if cfg.BrokerInfo == nil {
+		return nil, fmt.Errorf("sentinel broker info is required")
+	}
+	// Add one sentinel instance per resource type
+	for _, resourceType := range entities {
+		components = append(components,
+			sentinel.New(sentinel.Options{
+				Image:        cfg.SentinelImage,
+				Namespace:    cfg.Namespace,
+				ResourceType: resourceType.Plural,
+				APIBaseURL:   apiBaseUrl,
+				BrokerInfo:   cfg.BrokerInfo,
+			}))
+	}
+
+	return components, nil
 }
 
 // bundleSpecific returns the components unique to a bundle beyond the shared
@@ -154,4 +185,16 @@ func Resolve(b hyperfleetv1alpha1.BundleType, cfg Config) ([]Component, error) {
 		return nil, fmt.Errorf("resolve bundle %q: %w", b, err)
 	}
 	return append(shared, bundleSpecific(b)...), nil
+}
+
+// SetResolvedJWKSURL sets the OIDC-discovered JWKS URL on just the API component.
+// The controller calls this after bundle resolution but before Render, since
+// OIDC discovery is a network read that cannot happen at resolve time.
+func SetResolvedJWKSURL(components []Component, url string) {
+	for _, c := range components {
+		if ac, ok := c.(*api.Component); ok {
+			ac.ResolvedJWKSURL = url
+			return
+		}
+	}
 }

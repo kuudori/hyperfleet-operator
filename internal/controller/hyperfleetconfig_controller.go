@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
 	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/apply"
 	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/bundle"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/sentinel"
 	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/metrics"
 )
 
@@ -60,6 +62,15 @@ type HyperFleetConfigReconciler struct {
 	// RELATED_IMAGE_HYPERFLEET_API in main.go; empty falls back to the API
 	// component's compiled-in default.
 	APIImage string
+	// SentinelImage is the container image for the Sentinel operand. Sourced from
+	// RELATED_IMAGE_HYPERFLEET_SENTINEL in main.go.
+	SentinelImage string
+	// BrokerInfo contains the explicit fields required
+	// Contains Type which maps to BROKER_TYPE env variable
+	// Contains ProjectId which maps to BROKER_GOOGLEPUBSUB_PROJECT_ID
+	// which is only required when broker type is googlepubsub
+	BrokerInfo *sentinel.BrokerInfo
+
 	// HTTPClient performs OIDC discovery requests. Nil falls back to a lazily-built,
 	// reused hardened default client (see discoverJWKSURL/discoveryClientOnce);
 	// tests inject one pointed at an httptest server, bypassing that default
@@ -154,24 +165,46 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}()
 
-	// Read each referenced Secret's resourceVersion for the rollout hash. A
-	// rotation bumps resourceVersion without changing the rendered config.yaml or
-	// the pod spec, so without hashing it the pods would keep running with stale
-	// credentials/certs. A missing Secret is not fatal here — it is hashed as
-	// absent so the pods roll once the Secret appears — but it does drive the
-	// Degraded condition via missingSecrets below. This runs before OIDC discovery
-	// so a missing Secret still takes precedence in degradedCondition even when
-	// discovery also fails in the same reconcile.
-	secretData, err := r.referencedSecretData(ctx, cr)
+	// Resolve the bundle first so components can declare their referenced
+	// Secrets via ReferencedSecrets. ResolvedJWKSURL is set after OIDC
+	// discovery below, before Render.
+	components, err := bundle.Resolve(cr.Spec.Bundle, bundle.Config{
+		APIImage:      r.APIImage,
+		SentinelImage: r.SentinelImage,
+		Namespace:     r.OperatorNamespace,
+		BrokerInfo:    r.BrokerInfo,
+	})
 	if err != nil {
-		metrics.IncReconcileError("secrets")
-		return ctrl.Result{}, fmt.Errorf("read referenced secrets: %w", err)
+		metrics.IncReconcileError("bundle")
+		return ctrl.Result{}, fmt.Errorf("resolve components: %w", err)
 	}
-	for _, e := range secretData {
-		if !e.present {
-			missingSecrets = append(missingSecrets, e.id)
+
+	// Read each component's referenced Secrets for the rollout hash and the
+	// Degraded condition. A rotation bumps resourceVersion, so without hashing
+	// it the pods would keep running with stale credentials/certs. A missing
+	// Secret is not fatal — it is hashed as absent so the pods roll once the
+	// Secret appears — but it does drive the Degraded condition. This runs
+	// before OIDC discovery so a missing Secret still takes precedence in
+	// degradedCondition even when discovery also fails in the same reconcile.
+	componentEntries := make(map[string][]hashEntry, len(components))
+	for _, comp := range components {
+		refs := comp.ReferencedSecrets(cr)
+		entries, err := r.resolveSecretEntries(ctx, refs)
+		if err != nil {
+			metrics.IncReconcileError("secrets")
+			return ctrl.Result{}, fmt.Errorf("read referenced secrets for component %q: %w", comp.Name(), err)
+		}
+		componentEntries[comp.Name()] = entries
+		for _, e := range entries {
+			if !e.present {
+				missingSecrets = append(missingSecrets, e.id)
+			}
 		}
 	}
+	// Sort and deduplicate the missing Secret names so the Degraded condition
+	// message is deterministic and does not flip-flop on repeated reconciles.
+	slices.Sort(missingSecrets)
+	missingSecrets = slices.Compact(missingSecrets)
 
 	// Resolve the JWKS URL. When auth is on and the CR pins neither a JWKS URL nor
 	// a JWKS Secret, this performs OIDC discovery — a network read, so it lives
@@ -181,16 +214,7 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		metrics.IncReconcileError("discovery")
 		return ctrl.Result{}, fmt.Errorf("resolve JWKS URL: %w", err)
 	}
-
-	components, err := bundle.Resolve(cr.Spec.Bundle, bundle.Config{
-		APIImage:        r.APIImage,
-		Namespace:       r.OperatorNamespace,
-		ResolvedJWKSURL: jwksURL,
-	})
-	if err != nil {
-		metrics.IncReconcileError("bundle")
-		return ctrl.Result{}, fmt.Errorf("resolve components: %w", err)
-	}
+	bundle.SetResolvedJWKSURL(components, jwksURL)
 
 	componentConfigHashes := make([]string, 0, len(components))
 	for _, component := range components {
@@ -199,12 +223,7 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			metrics.IncReconcileError("render")
 			return ctrl.Result{}, fmt.Errorf("render component %q: %w", component.Name(), err)
 		}
-		// Stamp the config-hash on the component's Deployment pod template so a
-		// config or secret-value change rolls the pods. For components without a
-		// ConfigMap+Deployment pair (none today besides the API) this is a no-op
-		// beyond the returned hash. The hash is also folded into the applied-config
-		// metric below, so it reflects secret/resolved-value changes too.
-		componentConfigHashes = append(componentConfigHashes, stampConfigHash(objs, secretData))
+		componentConfigHashes = append(componentConfigHashes, stampConfigHash(objs, component.Rollout(), componentEntries[component.Name()]))
 		// Detect an imminent operand rollout before applying, while the live object
 		// still reflects the previous desired state. Runs after stampConfigHash so
 		// the desired template it hashes is the final one. The rollout counter

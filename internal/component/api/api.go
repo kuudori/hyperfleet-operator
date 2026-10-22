@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
 )
 
 // RelatedImageEnv is the release image override supplied by the bundle CSV.
@@ -62,23 +63,52 @@ type Component struct {
 type Options struct {
 	// Entities is the bundle-specific entity registration list.
 	Entities []EntityDescriptor
-	// ResolvedJWKSURL is the OIDC-discovered JWKS URL; see Component.
-	ResolvedJWKSURL string
 }
 
 // New constructs the API component for the given image and operator namespace.
 func New(image, namespace string, opts Options) *Component {
 	return &Component{
-		Image:           image,
-		Namespace:       namespace,
-		Entities:        opts.Entities,
-		ResolvedJWKSURL: opts.ResolvedJWKSURL,
+		Image:     image,
+		Namespace: namespace,
+		Entities:  opts.Entities,
 	}
 }
 
 // Name identifies the component in logs and the app.kubernetes.io/component label.
 func (c *Component) Name() string {
 	return ComponentName
+}
+
+// Rollout returns the ConfigMap and Deployment names the controller uses to
+// stamp a config-hash annotation for rolling pods on config/secret changes.
+func (c *Component) Rollout() component.RolloutTarget {
+	return component.RolloutTarget{
+		ConfigEntries: []component.ConfigEntry{
+			{ConfigMapName: ConfigMapName, ConfigFileKey: ConfigFileKey},
+		},
+		DeploymentName: ResourceName,
+	}
+}
+
+// ReferencedSecrets returns the Secrets the API pods consume. The database
+// Secret is always referenced; TLS and JWKS Secrets are conditional on the CR.
+func (c *Component) ReferencedSecrets(cr *hyperfleetv1alpha1.HyperFleetConfig) []component.SecretReference {
+	refs := []component.SecretReference{
+		{Role: "database", SecretName: cr.Spec.API.Database.SecretRef.Name},
+	}
+	if cr.Spec.API.TLS != nil {
+		refs = append(refs, component.SecretReference{
+			Role:       "tls",
+			SecretName: cr.Spec.API.TLS.SecretRef.Name,
+		})
+	}
+	if AuthEnabled(cr) && cr.Spec.API.Auth.JWKCertSecretRef != nil {
+		refs = append(refs, component.SecretReference{
+			Role:       "jwks",
+			SecretName: cr.Spec.API.Auth.JWKCertSecretRef.Name,
+		})
+	}
+	return refs
 }
 
 // Render returns the full desired-state operand set for the API, in a

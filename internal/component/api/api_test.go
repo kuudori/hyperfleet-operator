@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
 )
 
 const (
@@ -275,7 +276,9 @@ func TestRenderJWKSMountOnlyWhenSecretRef(t *testing.T) {
 	// TestRenderDiscoveredJWKSURLLandsInConfig).
 	cr := testCR()
 	cr.Spec.API.Auth.JWKCertSecretRef = nil
-	objs, err := New("img", testNamespace, Options{ResolvedJWKSURL: "https://issuer.example.com/discovered"}).Render(context.Background(), cr)
+	comp := New("img", testNamespace, Options{})
+	comp.ResolvedJWKSURL = "https://issuer.example.com/discovered"
+	objs, err := comp.Render(context.Background(), cr)
 	g.Expect(err).NotTo(HaveOccurred())
 	dep2, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
 	g.Expect(ok).To(BeTrue())
@@ -302,13 +305,15 @@ func TestRenderDiscoveredJWKSURLLandsInConfig(t *testing.T) {
 	g := NewWithT(t)
 
 	// Auth on with no pinned Secret: resolveJWKSource falls through to the
-	// controller-supplied OIDC-discovered URL (Options.ResolvedJWKSURL), which
+	// controller-supplied OIDC-discovered URL (Component.ResolvedJWKSURL), which
 	// must be written into config.yaml as jwk_cert_url with no JWKS mount.
 	cr := testCR()
 	cr.Spec.API.Auth.JWKCertSecretRef = nil
 	const discovered = "https://issuer.example.com/discovered/keys"
 
-	objs, err := New("img", testNamespace, Options{ResolvedJWKSURL: discovered}).Render(context.Background(), cr)
+	comp := New("img", testNamespace, Options{})
+	comp.ResolvedJWKSURL = discovered
+	objs, err := comp.Render(context.Background(), cr)
 	g.Expect(err).NotTo(HaveOccurred())
 
 	dep, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
@@ -320,6 +325,49 @@ func TestRenderDiscoveredJWKSURLLandsInConfig(t *testing.T) {
 	c0 := parseConfig(t, cm.Data[ConfigFileKey])["server"].(map[string]any)["jwt"].(map[string]any)["configs"].([]any)[0].(map[string]any)
 	g.Expect(c0["jwk_cert_url"]).To(Equal(discovered))
 	g.Expect(c0).NotTo(HaveKey("jwk_cert_file"))
+}
+
+func TestReferencedSecrets(t *testing.T) {
+	g := NewWithT(t)
+	comp := New("img", testNamespace, Options{})
+
+	roleSet := func(refs []component.SecretReference) map[string]bool {
+		m := make(map[string]bool, len(refs))
+		for _, r := range refs {
+			m[r.Role] = true
+		}
+		return m
+	}
+
+	// Default fixture: auth enabled with JWKS Secret, no TLS.
+	roles := roleSet(comp.ReferencedSecrets(testCR()))
+	g.Expect(roles).To(HaveKey("database"))
+	g.Expect(roles).To(HaveKey("jwks"))
+	g.Expect(roles).NotTo(HaveKey("tls"))
+
+	// TLS configured: adds "tls" role.
+	crTLS := testCR()
+	crTLS.Spec.API.TLS = &hyperfleetv1alpha1.TLSSpec{
+		SecretRef: hyperfleetv1alpha1.SecretReference{Name: testTLSSecret},
+	}
+	roles = roleSet(comp.ReferencedSecrets(crTLS))
+	g.Expect(roles).To(HaveKey("database"))
+	g.Expect(roles).To(HaveKey("jwks"))
+	g.Expect(roles).To(HaveKey("tls"))
+
+	// Auth disabled: no JWKS secret even though JWKCertSecretRef is set.
+	crNoAuth := testCR()
+	crNoAuth.Spec.API.Auth.Enabled = ptr.To(false)
+	roles = roleSet(comp.ReferencedSecrets(crNoAuth))
+	g.Expect(roles).To(HaveKey("database"))
+	g.Expect(roles).NotTo(HaveKey("jwks"))
+
+	// Auth enabled but no pinned JWKS Secret: no JWKS secret (uses discovered URL).
+	crNoJWKSSecret := testCR()
+	crNoJWKSSecret.Spec.API.Auth.JWKCertSecretRef = nil
+	roles = roleSet(comp.ReferencedSecrets(crNoJWKSSecret))
+	g.Expect(roles).To(HaveKey("database"))
+	g.Expect(roles).NotTo(HaveKey("jwks"))
 }
 
 // volumeNames returns the pod's volume names.

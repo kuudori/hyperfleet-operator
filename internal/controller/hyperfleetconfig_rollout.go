@@ -41,6 +41,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
 	apicomponent "github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/api"
 )
 
@@ -423,12 +424,11 @@ type hashEntry struct {
 	value   []byte
 }
 
-// referencedSecretData reads the resourceVersion of each Secret the API
-// actually consumes and returns them as hash entries. It reads only what the
-// current spec references: the database Secret always, the TLS Secret when
-// spec.api.tls is set, and the JWKS Secret when spec.api.auth.jwkCertSecretRef
-// is set. A missing Secret is not an error here (see Reconcile); it is
-// recorded as absent.
+// resolveSecretEntries reads the resourceVersion of each referenced Secret and
+// returns hash entries. A missing Secret is recorded as absent (not an error);
+// the controller surfaces it via the Degraded condition. Each component
+// declares its own references via ReferencedSecrets, so the hash is scoped to
+// only the Secrets that component actually consumes.
 //
 // The hash covers resourceVersion, not Secret data. Hashing the actual
 // credential bytes was the original design, but it turns the pod-template
@@ -440,46 +440,21 @@ type hashEntry struct {
 // resourceVersion changes on every write, including a rotation, which is all
 // the rollout needs, and it means the operator never needs to read Secret
 // payloads at all — only their metadata.
-func (r *HyperFleetConfigReconciler) referencedSecretData(ctx context.Context, cr *hyperfleetv1alpha1.HyperFleetConfig) ([]hashEntry, error) {
-	// getEntry returns the named Secret's resourceVersion as a hash entry.
-	// NotFound is reported as present=false with no error; any other error is
-	// returned.
-	getEntry := func(role, secretName string) (hashEntry, error) {
+func (r *HyperFleetConfigReconciler) resolveSecretEntries(ctx context.Context, refs []component.SecretReference) ([]hashEntry, error) {
+	entries := make([]hashEntry, 0, len(refs))
+	// iterate over the component's referenced Secrets,
+	for _, ref := range refs {
 		s := &corev1.Secret{}
-		key := types.NamespacedName{Name: secretName, Namespace: r.OperatorNamespace}
+		key := types.NamespacedName{Name: ref.SecretName, Namespace: r.OperatorNamespace}
 		if err := r.Get(ctx, key, s); err != nil {
 			if apierrors.IsNotFound(err) {
-				return hashEntry{id: role}, nil
+				entries = append(entries, hashEntry{id: ref.Role})
+				continue
 			}
-			return hashEntry{}, fmt.Errorf("get secret %q: %w", secretName, err)
+			return nil, fmt.Errorf("get secret %q: %w", ref.SecretName, err)
 		}
-		return hashEntry{id: role, present: true, value: []byte(s.ResourceVersion)}, nil
+		entries = append(entries, hashEntry{id: ref.Role, present: true, value: []byte(s.ResourceVersion)})
 	}
-
-	var entries []hashEntry
-
-	dbEntry, err := getEntry("database", cr.Spec.API.Database.SecretRef.Name)
-	if err != nil {
-		return nil, err
-	}
-	entries = append(entries, dbEntry)
-
-	if cr.Spec.API.TLS != nil {
-		tlsEntry, err := getEntry("tls", cr.Spec.API.TLS.SecretRef.Name)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, tlsEntry)
-	}
-
-	if apicomponent.AuthEnabled(cr) && cr.Spec.API.Auth.JWKCertSecretRef != nil {
-		jwksEntry, err := getEntry("jwks", cr.Spec.API.Auth.JWKCertSecretRef.Name)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, jwksEntry)
-	}
-
 	return entries, nil
 }
 
@@ -517,29 +492,27 @@ func computeConfigHash(configYAML string, entries []hashEntry) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// stampConfigHash computes the rollout hash from the component's rendered
-// ConfigMap plus the referenced-secret entries and writes it onto the component's
-// Deployment pod-template annotations. It matches operands by the API component's
-// well-known names, so for a component without that ConfigMap+Deployment pair it
-// is a no-op beyond returning the (ConfigMap-less) hash. Mutating the Deployment
-// in place is safe: the object was just rendered and has not yet been applied.
-// The returned hash is also folded into the applied-config metric (see
-// hashConfig) so a Secret rotation or resolved-value drift shows up there too,
-// not just as a pod-template rollout.
-func stampConfigHash(objs []client.Object, entries []hashEntry) string {
-	var configYAML string
-	for _, o := range objs {
-		if cm, ok := o.(*corev1.ConfigMap); ok && cm.Name == apicomponent.ConfigMapName {
-			configYAML = cm.Data[apicomponent.ConfigFileKey]
-			break
+// stampConfigHash computes a rollout hash from the component's rendered
+// ConfigMap data and the supplied hash entries, then writes it as a
+// pod-template annotation on the component's Deployment. A change in any
+// input produces a new hash, which triggers a rolling restart.
+func stampConfigHash(objs []client.Object, target component.RolloutTarget, entries []hashEntry) string {
+	var configYAMLs []string
+	for _, entry := range target.ConfigEntries {
+		for _, o := range objs {
+			if cm, ok := o.(*corev1.ConfigMap); ok && cm.Name == entry.ConfigMapName {
+				configYAMLs = append(configYAMLs, cm.Data[entry.ConfigFileKey])
+				break
+			}
 		}
 	}
+	configYAML := strings.Join(configYAMLs, "\x00")
 
 	hash := computeConfigHash(configYAML, entries)
 
 	for _, o := range objs {
 		dep, ok := o.(*appsv1.Deployment)
-		if !ok || dep.Name != apicomponent.ResourceName {
+		if !ok || dep.Name != target.DeploymentName {
 			continue
 		}
 		if dep.Spec.Template.Annotations == nil {
