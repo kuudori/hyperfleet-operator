@@ -173,10 +173,7 @@ the base's order. Check the rendered environment by variable name, not by index.
 
 For production, related images must be digest-pinned and must match every
 operand image and every `RELATED_IMAGE_` value in the CSV. The validator under
-`validators/related-images` enforces that relationship. Build bundles locally
-with `CONTAINER_TOOL=docker`: the Makefile picks podman first when both are
-installed, and podman fails in the bundle's validator stage with
-`mkdir ./bin/: permission denied`. See
+`validators/related-images` enforces that relationship. See
 [Adding a component image to the nudge chain](olm.md#adding-a-component-image-to-the-nudge-chain)
 for the cross-repository nudge workflow and merge order.
 
