@@ -92,6 +92,8 @@ before adding an operand.
 
 ## Local development workflow
 
+Repository coding-agent guidance lives in [`AGENTS.md`](../AGENTS.md).
+
 Start by confirming that generated files agree with the API and RBAC markers:
 
 ```sh
