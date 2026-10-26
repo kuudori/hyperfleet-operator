@@ -10,6 +10,7 @@ The generated CRD remains the admission-time source of truth.
 - [Resource identity](#resource-identity)
 - [Example](#example)
 - [Specification](#specification)
+  - [TLS port advertisement](#tls-port-advertisement)
   - [Referenced Secret contracts](#referenced-secret-contracts)
   - [Authentication and JWKS selection](#authentication-and-jwks-selection)
   - [Current sizing limitation](#current-sizing-limitation)
@@ -74,10 +75,21 @@ configuration can change it.
 | `spec.api.auth.audience` | Conditional | None | Required and non-empty when auth is enabled; 1 to 253 characters when present. |
 | `spec.api.auth.jwkCertSecretRef` | No | None | Optional name-only reference to a Secret containing a JWKS document. |
 | `spec.api.auth.jwkCertSecretRef.name` | Conditional | None | Required when the reference is present; DNS-1123 subdomain, 1 to 253 characters. |
-| `spec.api.tls` | No | No `server.tls` block; API serves plain HTTP | Optional API-serving TLS configuration. |
+| `spec.api.tls` | No | No `server.tls` block; API serves plain HTTP | Optional API-serving TLS configuration. See [TLS port advertisement](#tls-port-advertisement). |
 | `spec.api.tls.secretRef` | Conditional | None | Required when `tls` is present; name-only reference in the operator namespace. |
 | `spec.api.tls.secretRef.name` | Conditional | None | DNS-1123 subdomain, 1 to 253 characters. |
 | `spec.api.profile` | No | `small` | Mutable. Accepted values are `small`, `medium`, and `large`. See [current sizing limitation](#current-sizing-limitation). |
+
+### TLS port advertisement
+
+When `spec.api.tls` is set, the API listener serves HTTPS and the rendered
+operands advertise that: the API container port and the Service port are named
+`https` (instead of `http`) and the Service sets `appProtocol: https`, so
+Kubernetes-aware proxies and service meshes route to the listener as TLS.
+Clients must call the API Service with `https://` in that case; a plaintext
+request fails with `Client sent an HTTP request to an HTTPS server`. With
+`spec.api.tls` unset, the ports keep their `http` names and no `appProtocol` is
+set, leaving plain-HTTP routing unchanged.
 
 ### Referenced Secret contracts
 

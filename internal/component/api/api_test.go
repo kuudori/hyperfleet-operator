@@ -608,3 +608,82 @@ func TestRenderService(t *testing.T) {
 	g.Expect(svc.Spec.Ports).To(HaveLen(3))
 	g.Expect(svc.Spec.Selector).To(HaveKeyWithValue(labelComponent, ComponentName))
 }
+
+// renderDeploymentAndService renders the CR and returns the Deployment and
+// Service operands — the two objects whose API port advertisement
+func renderDeploymentAndService(t *testing.T, cr *hyperfleetv1alpha1.HyperFleetConfig) (*appsv1.Deployment, *corev1.Service) {
+	t.Helper()
+	g := NewWithT(t)
+	objs, err := New("img", testNamespace, Options{}).Render(context.Background(), cr)
+	g.Expect(err).NotTo(HaveOccurred())
+	dep, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
+	g.Expect(ok).To(BeTrue())
+	svc, ok := byKind(objs)["Service"].(*corev1.Service)
+	g.Expect(ok).To(BeTrue())
+	return dep, svc
+}
+
+// apiContainerPort returns the API runtime container's main (port 8000) port.
+func apiContainerPort(dep *appsv1.Deployment) corev1.ContainerPort {
+	for _, p := range dep.Spec.Template.Spec.Containers[0].Ports {
+		if p.ContainerPort == portHTTP {
+			return p
+		}
+	}
+	return corev1.ContainerPort{}
+}
+
+// apiServicePort returns the Service's main (port 8000) port.
+func apiServicePort(svc *corev1.Service) corev1.ServicePort {
+	for _, p := range svc.Spec.Ports {
+		if p.Port == portHTTP {
+			return p
+		}
+	}
+	return corev1.ServicePort{}
+}
+
+// TestRenderAPIPortAdvertisesListenerProtocol the API container
+// and Service ports must advertise the protocol the listener actually
+// serves. With spec.api.tls set the API listens for HTTPS
+func TestRenderAPIPortAdvertisesListenerProtocol(t *testing.T) {
+	g := NewWithT(t)
+
+	// TLS unset (fixture default): plain HTTP advertisement, unchanged.
+	dep, svc := renderDeploymentAndService(t, testCR())
+	cp := apiContainerPort(dep)
+	g.Expect(cp.Name).To(Equal("http"))
+	g.Expect(cp.Protocol).To(Equal(corev1.ProtocolTCP))
+	sp := apiServicePort(svc)
+	g.Expect(sp.Name).To(Equal("http"))
+	g.Expect(sp.TargetPort.StrVal).To(Equal("http"))
+	g.Expect(sp.Protocol).To(Equal(corev1.ProtocolTCP))
+	g.Expect(sp.AppProtocol).To(BeNil())
+
+	// TLS set: the listener serves HTTPS, so every advertisement flips to
+	// https. protocol stays TCP, which is correct for both HTTP and HTTPS.
+	cr := testCR()
+	cr.Spec.API.TLS = &hyperfleetv1alpha1.TLSSpec{
+		SecretRef: hyperfleetv1alpha1.SecretReference{Name: testTLSSecret},
+	}
+	dep, svc = renderDeploymentAndService(t, cr)
+	cp = apiContainerPort(dep)
+	g.Expect(cp.Name).To(Equal("https"))
+	g.Expect(cp.Protocol).To(Equal(corev1.ProtocolTCP))
+	sp = apiServicePort(svc)
+	g.Expect(sp.Name).To(Equal("https"))
+	g.Expect(sp.TargetPort.StrVal).To(Equal("https"))
+	g.Expect(sp.Protocol).To(Equal(corev1.ProtocolTCP))
+	g.Expect(sp.AppProtocol).To(HaveValue(Equal("https")))
+
+	// The housekeeping ports keep their names with TLS on (the unset case is
+	// covered by TestRenderDeployment's port map). The int32 casts are needed
+	// because the untyped port constants would otherwise box as int keys.
+	names := map[int32]string{}
+	for _, p := range svc.Spec.Ports {
+		names[p.Port] = p.Name
+	}
+	g.Expect(svc.Spec.Ports).To(HaveLen(3))
+	g.Expect(names).To(HaveKeyWithValue(int32(portHealth), portNameHealth))
+	g.Expect(names).To(HaveKeyWithValue(int32(portMetrics), portNameMetrics))
+}

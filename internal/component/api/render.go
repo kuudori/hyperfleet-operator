@@ -75,6 +75,7 @@ const (
 
 	// Container/Service port names and numbers, matching the chart defaults.
 	portNameHTTP    = "http"
+	portNameHTTPS   = "https"
 	portNameHealth  = "health"
 	portNameMetrics = "metrics"
 	portHTTP        = 8000
@@ -105,6 +106,24 @@ const (
 
 func ServiceURL(namespace string) string {
 	return fmt.Sprintf("http://%s.%s.svc:%d", ResourceName, namespace, portHTTP)
+}
+
+// apiPortName returns the API container/Service port name: "https" when the CR
+// enables TLS on the API listener, "http" otherwise.
+func apiPortName(cr *hyperfleetv1alpha1.HyperFleetConfig) string {
+	if cr.Spec.API.TLS != nil {
+		return portNameHTTPS
+	}
+	return portNameHTTP
+}
+
+// apiAppProtocol returns the API Service port's appProtocol: "https"
+// when the listener serves TLS, nil otherwise.
+func apiAppProtocol(cr *hyperfleetv1alpha1.HyperFleetConfig) *string {
+	if cr.Spec.API.TLS != nil {
+		return ptr.To(portNameHTTPS)
+	}
+	return nil
 }
 
 // labels returns the common label set stamped on every operand's metadata. Only
@@ -163,12 +182,13 @@ func apiContainerSecurityContext() *corev1.SecurityContext {
 // Database credentials are delivered via a read-only Secret mount plus
 // HYPERFLEET_DATABASE_*_FILE env vars (HYPERFLEET-1603, api.DefaultImage
 // v0.4.0+), and TLS/JWKS Secrets are mounted read-only when the corresponding
-// spec fields are set (HYPERFLEET-1408). Replicas and resources remain the
-// fixed 1407 baseline (profile→resources is out of scope for 1408). A
-// db-migrate init container uses the same file-based configuration as serve,
-// so a fresh partner-provided database is ready before the API accepts
-// requests. The config-hash pod-template annotation is added later by the
-// controller, not here.
+// spec fields are set. The API container port is named after the listener's
+// actual protocol — https when spec.api.tls is set, http otherwise.//
+// Replicas and resources remain the fixed 1407 baseline (profile→resources is
+// out of scope for 1408). A db-migrate init container uses the same file-based
+// configuration as serve, so a fresh partner-provided database is ready before
+// the API accepts requests. The config-hash pod-template annotation is added
+// later by the controller, not here.
 func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace string) *appsv1.Deployment {
 	dbSecret := cr.Spec.API.Database.SecretRef.Name
 
@@ -304,7 +324,7 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace string
 						WorkingDir:      "/app",
 						Args:            []string{"serve"},
 						Ports: []corev1.ContainerPort{
-							{Name: portNameHTTP, ContainerPort: portHTTP, Protocol: corev1.ProtocolTCP},
+							{Name: apiPortName(cr), ContainerPort: portHTTP, Protocol: corev1.ProtocolTCP},
 							{Name: portNameHealth, ContainerPort: portHealth, Protocol: corev1.ProtocolTCP},
 							{Name: portNameMetrics, ContainerPort: portMetrics, Protocol: corev1.ProtocolTCP},
 						},
@@ -339,8 +359,12 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace string
 }
 
 // service builds the API's ClusterIP Service. Ports target the container ports
-// by name so they stay correct even if numbers change.
+// by name so they stay correct even if numbers change. The API port is named
+// after the listener's actual protocol (https with TLS, http without) and
+// carries appProtocol: https only when TLS is enabled, so Kubernetes-aware
+// proxies and service meshes route with the right protocol.
 func service(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *corev1.Service {
+	apiPort := apiPortName(cr)
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -352,7 +376,7 @@ func service(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *corev1.
 			Type:     corev1.ServiceTypeClusterIP,
 			Selector: selectorLabels(cr.Name),
 			Ports: []corev1.ServicePort{
-				{Name: portNameHTTP, Port: portHTTP, TargetPort: intstr.FromString(portNameHTTP), Protocol: corev1.ProtocolTCP},
+				{Name: apiPort, Port: portHTTP, TargetPort: intstr.FromString(apiPort), Protocol: corev1.ProtocolTCP, AppProtocol: apiAppProtocol(cr)},
 				{Name: portNameHealth, Port: portHealth, TargetPort: intstr.FromString(portNameHealth), Protocol: corev1.ProtocolTCP},
 				{Name: portNameMetrics, Port: portMetrics, TargetPort: intstr.FromString(portNameMetrics), Protocol: corev1.ProtocolTCP},
 			},
