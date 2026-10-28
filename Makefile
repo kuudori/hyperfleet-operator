@@ -185,6 +185,11 @@ OPERATOR_IMG ?= $(IMG_REGISTRY)/$(IMG_NAME):$(IMG_TAG)
 export RELATED_IMAGE_HYPERFLEET_OPERATOR ?= $(OPERATOR_IMG)
 export RELATED_IMAGE_HYPERFLEET_API ?= quay.io/redhat-services-prod/hyperfleet-tenant/hyperfleet/hyperfleet-api:latest
 export RELATED_IMAGE_HYPERFLEET_SENTINEL ?= quay.io/redhat-services-prod/hyperfleet-tenant/hyperfleet/hyperfleet-sentinel:latest
+# Sentinel broker backend: rabbitmq (the operator's default, no extra settings) or
+# googlepubsub, which also needs BROKER_GOOGLEPUBSUB_PROJECT_ID. Only googlepubsub
+# adds broker variables to the operator Deployment (config/overlays/googlepubsub).
+BROKER_TYPE ?= rabbitmq
+export BROKER_GOOGLEPUBSUB_PROJECT_ID ?=
 
 # Base image for production builds - matches Dockerfile default
 # Override with DEV_BASE_IMAGE for dev builds (see image-dev target)
@@ -291,10 +296,32 @@ undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/confi
 # Override images via env vars:
 #   make build-deployer RELATED_IMAGE_HYPERFLEET_OPERATOR=<op-img> RELATED_IMAGE_HYPERFLEET_API=<api-img>
 
+# Kustomize directory rendered by build-deployer, chosen by BROKER_TYPE.
+ifeq ($(BROKER_TYPE),rabbitmq)
+DEPLOYER_KUSTOMIZE_DIR := config/default
+else ifeq ($(BROKER_TYPE),googlepubsub)
+DEPLOYER_KUSTOMIZE_DIR := config/overlays/googlepubsub
+endif
+
 .PHONY: build-deployer
-build-deployer: manifests generate ## Generate a consolidated YAML with CRDs and deployment.
+build-deployer: manifests generate ## Generate a consolidated YAML with CRDs and deployment (BROKER_TYPE=rabbitmq|googlepubsub).
+ifndef DEPLOYER_KUSTOMIZE_DIR
+	$(error BROKER_TYPE must be rabbitmq or googlepubsub, got '$(BROKER_TYPE)')
+endif
+ifeq ($(BROKER_TYPE),googlepubsub)
+ifeq ($(strip $(BROKER_GOOGLEPUBSUB_PROJECT_ID)),)
+	$(error BROKER_GOOGLEPUBSUB_PROJECT_ID must be set when BROKER_TYPE=googlepubsub)
+endif
+endif
 	@mkdir -p dist
-	@$(KUSTOMIZE) build config/default | envsubst > dist/install.yaml
+ifeq ($(BROKER_TYPE),googlepubsub)
+	@[[ "$$BROKER_GOOGLEPUBSUB_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$$ ]] || { \
+		echo "Error: BROKER_GOOGLEPUBSUB_PROJECT_ID '$$BROKER_GOOGLEPUBSUB_PROJECT_ID' is not a valid GCP project ID:" \
+			"6-30 lowercase letters, digits, or hyphens; must start with a letter and end with a letter or digit"; \
+		exit 1; \
+	}
+endif
+	@$(KUSTOMIZE) build $(DEPLOYER_KUSTOMIZE_DIR) | envsubst > dist/install.yaml
 
 
 # For now `stable` channel is the default and only channel

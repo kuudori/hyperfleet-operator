@@ -159,6 +159,19 @@ func AuthEnabled(cr *hyperfleetv1alpha1.HyperFleetConfig) bool {
 	return e == nil || *e
 }
 
+// TLSEnabled reports whether the CR enables TLS on the API listener.
+func TLSEnabled(cr *hyperfleetv1alpha1.HyperFleetConfig) bool {
+	return cr.Spec.API.TLS != nil
+}
+
+// APIBaseURL is the in-cluster base URL clients (the Sentinels) use to reach
+// the API Service. It uses the Service's fully qualified DNS name so the
+// hostname matches the SAN a certificate for the Service carries
+// (hyperfleet-api.<namespace>.svc); see the CR reference's TLS section.
+func APIBaseURL(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) string {
+	return fmt.Sprintf("%s://%s.%s.svc:%d", apiScheme(cr), ResourceName, namespace, portHTTP)
+}
+
 // resolveJWKSource picks the single JWKS source for the config file: a mounted
 // CR Secret (a file path) when jwkCertSecretRef is set, else the
 // controller-supplied OIDC-discovered URL. It returns (url, file) with at most

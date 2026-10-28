@@ -45,6 +45,8 @@ type configInput struct {
 	ResourceType string
 	APIBaseURL   string
 	BrokerTopic  string
+	HasParent    bool
+	AuthEnabled  bool
 }
 
 // sentinelConfig and its nested types are the operator-owned subset of
@@ -59,6 +61,7 @@ type sentinelConfig struct {
 	PollInterval    string                `json:"poll_interval"`
 	MessageDecision messageDecisionConfig `json:"message_decision"`
 	MessageData     messageDataConfig     `json:"message_data"`
+	TracingEnabled  bool                  `json:"tracing_enabled"`
 }
 
 type sentinelInfo struct {
@@ -77,56 +80,20 @@ type clientsConfig struct {
 }
 
 type hyperfleetAPIClientConfig struct {
-	BaseURL string `json:"base_url"`
-	Version string `json:"version"`
-	Timeout string `json:"timeout"`
+	BaseURL string      `json:"base_url"`
+	Version string      `json:"version"`
+	Timeout string      `json:"timeout"`
+	Auth    *authConfig `json:"auth,omitempty"`
+}
+
+type authConfig struct {
+	TokenPath     string `json:"token_path"`
+	Scheme        string `json:"scheme"`
+	TokenCacheTTL string `json:"token_cache_ttl,omitempty"`
 }
 
 type brokerClientConfig struct {
 	Topic string `json:"topic"`
-}
-
-// message_decision and message_data are the CEL defaults the
-// hyperfleet-sentinel chart ships; the binary validates both as required.
-type messageDecisionConfig struct {
-	Params []messageDecisionParam `json:"params"`
-	Result string                 `json:"result"`
-}
-
-type messageDecisionParam struct {
-	Name string `json:"name"`
-	Expr string `json:"expr"`
-}
-
-type messageDataConfig struct {
-	ID         string `json:"id"`
-	Kind       string `json:"kind"`
-	Href       string `json:"href"`
-	Generation string `json:"generation"`
-}
-
-func defaultMessageDecision() messageDecisionConfig {
-	return messageDecisionConfig{
-		Params: []messageDecisionParam{
-			{Name: "ref_time", Expr: `condition("Reconciled").last_updated_time`},
-			{Name: "is_reconciled", Expr: `condition("Reconciled").status == "True"`},
-			{Name: "has_ref_time", Expr: `ref_time != ""`},
-			{Name: "is_new_resource", Expr: "resource.generation == 1 && !has_ref_time"},
-			{Name: "generation_mismatch", Expr: `resource.generation > condition("Reconciled").observed_generation`},
-			{Name: "reconciled_and_stale", Expr: `is_reconciled && has_ref_time && now - timestamp(ref_time) > duration("30m")`},
-			{Name: "not_reconciled_and_debounced", Expr: `!is_reconciled && has_ref_time && now - timestamp(ref_time) > duration("10s")`},
-		},
-		Result: "is_new_resource || generation_mismatch || reconciled_and_stale || not_reconciled_and_debounced",
-	}
-}
-
-func defaultMessageData() messageDataConfig {
-	return messageDataConfig{
-		ID:         "resource.id",
-		Kind:       "resource.kind",
-		Href:       "resource.href",
-		Generation: "resource.generation",
-	}
 }
 
 // broker.yaml nests everything under one top-level broker key; exactly one of
@@ -151,8 +118,52 @@ type googlePubSubConfig struct {
 	CreateTopicIfMissing bool   `json:"create_topic_if_missing"`
 }
 
+type messageDecisionConfig struct {
+	Params []messageDecisionParam `json:"params"`
+	Result string                 `json:"result"`
+}
+
+type messageDecisionParam struct {
+	Name string `json:"name"`
+	Expr string `json:"expr"`
+}
+
+type ownerReferenceConfig struct {
+	ID   string `json:"id"`
+	Href string `json:"href"`
+	Kind string `json:"kind"`
+}
+
+type messageDataConfig struct {
+	ID              string                `json:"id"`
+	Kind            string                `json:"kind"`
+	Href            string                `json:"href"`
+	Generation      string                `json:"generation"`
+	OwnerReferences *ownerReferenceConfig `json:"owner_references,omitempty"`
+}
+
 // renderConfig serializes config.yaml for one instance.
 func renderConfig(in configInput) (string, error) {
+	APIClientConfig := &hyperfleetAPIClientConfig{
+		BaseURL: in.APIBaseURL,
+		Version: apiClientVersion,
+		Timeout: apiClientTimeout,
+	}
+	// If auth is enabled, append the auth values into the config
+	if in.AuthEnabled {
+		APIClientConfig.Auth = &authConfig{
+			TokenPath:     fmt.Sprintf("%s/%s", ServiceAccountTokenPath, ServiceAccountTokenFileName),
+			Scheme:        "Bearer",
+			TokenCacheTTL: "30s",
+		}
+	}
+
+	msgDecision, err := constructMessageDecision(in.ResourceType)
+	if err != nil {
+		return "", fmt.Errorf("construct message decision: %w", err)
+	}
+	msgData := constructMessageData(in.HasParent)
+
 	cfg := sentinelConfig{
 		Sentinel: sentinelInfo{Name: ResourceName(in.ResourceType)},
 		Log: logConfig{
@@ -161,17 +172,14 @@ func renderConfig(in configInput) (string, error) {
 			Output: logOutput,
 		},
 		Clients: clientsConfig{
-			HyperFleetAPI: hyperfleetAPIClientConfig{
-				BaseURL: in.APIBaseURL,
-				Version: apiClientVersion,
-				Timeout: apiClientTimeout,
-			},
-			Broker: brokerClientConfig{Topic: in.BrokerTopic},
+			HyperFleetAPI: *APIClientConfig,
+			Broker:        brokerClientConfig{Topic: in.BrokerTopic},
 		},
 		ResourceType:    in.ResourceType,
 		PollInterval:    pollInterval,
-		MessageDecision: defaultMessageDecision(),
-		MessageData:     defaultMessageData(),
+		MessageDecision: *msgDecision,
+		MessageData:     *msgData,
+		TracingEnabled:  false,
 	}
 
 	out, err := yaml.Marshal(cfg)
@@ -179,12 +187,6 @@ func renderConfig(in configInput) (string, error) {
 		return "", fmt.Errorf("marshal sentinel config: %w", err)
 	}
 	return configHeader + string(out), nil
-}
-
-// brokerTopic namespaces the topic by the operator's namespace so resource
-// types never collide on the same topic.
-func brokerTopic(namespace, resourceType string) string {
-	return namespace + "-" + resourceType
 }
 
 // renderBrokerConfig serializes broker.yaml. It errors on a broker type that
@@ -217,5 +219,59 @@ func renderBrokerConfig(brokerInfo *BrokerInfo) (string, error) {
 		return "", fmt.Errorf("marshal sentinel broker config: %w", err)
 	}
 	return brokerConfigHeader + string(out), nil
+}
 
+func constructMessageData(hasParent bool) (md *messageDataConfig) {
+	md = &messageDataConfig{
+		ID:         "resource.id",
+		Kind:       "resource.kind",
+		Href:       "resource.href",
+		Generation: "resource.generation",
+	}
+	// child resources need to include owner references
+	if hasParent {
+		md.OwnerReferences = &ownerReferenceConfig{
+			ID:   "resource.owner_references.id",
+			Href: "resource.owner_references.href",
+			Kind: "resource.owner_references.kind",
+		}
+	}
+	return
+}
+
+// constructMessageDecision constructs the message_decision config for the given resource type.
+// It returns an error if the resource type is not supported.
+func constructMessageDecision(resourceType string) (*messageDecisionConfig, error) {
+	switch resourceType {
+	case "nodepools", "clusters":
+		return &messageDecisionConfig{
+			Params: []messageDecisionParam{
+				{Name: "ref_time", Expr: `condition("Reconciled").last_updated_time`},
+				{Name: "is_reconciled", Expr: `condition("Reconciled").status == "True"`},
+				{Name: "has_ref_time", Expr: `ref_time != ""`},
+				{Name: "is_new_resource", Expr: "resource.generation == 1 && !has_ref_time"},
+				{Name: "generation_mismatch", Expr: `resource.generation > condition("Reconciled").observed_generation`},
+				{Name: "reconciled_and_stale", Expr: `is_reconciled && has_ref_time && now - timestamp(ref_time) > duration("30m")`},
+				{Name: "not_reconciled_and_debounced", Expr: `!is_reconciled && has_ref_time && now - timestamp(ref_time) > duration("10s")`},
+			},
+			Result: "is_new_resource || generation_mismatch || reconciled_and_stale || not_reconciled_and_debounced",
+		}, nil
+	// For versions, wifconfigs, and channels, Sentinel publishes only when it evaluates the resource within five minutes of updated_time.
+	// If Sentinel cannot evaluate an update before that window expires, the update can go unpublished.
+	// This rule does not guarantee recovery of missed updates.
+	case "versions", "wifconfigs", "channels":
+		return &messageDecisionConfig{
+			Params: []messageDecisionParam{
+				{Name: "recently_updated", Expr: `now - timestamp(resource.updated_time) < duration("5m")`},
+			},
+			Result: "recently_updated",
+		}, nil
+	}
+	return nil, fmt.Errorf("no message_decision defined for resource type %q", resourceType)
+}
+
+// brokerTopic namespaces the topic by the operator's namespace so resource
+// types never collide on the same topic.
+func brokerTopic(namespace, resourceType string) string {
+	return namespace + "-" + resourceType
 }
