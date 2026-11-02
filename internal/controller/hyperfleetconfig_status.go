@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -27,7 +28,8 @@ import (
 
 // aggregateStatus rolls up each component's reported Conditions plus the
 // controller-level Degraded signal (a missing referenced Secret, or a
-// reconcile error) into the CR's top-level status.conditions, and sets
+// reconcile error) into the CR's top-level status.conditions, publishes the
+// per-component conditions in status.components, and sets
 // status.observedGeneration. It reports whether anything actually changed, so
 // Reconcile can skip a no-op Status().Update() call.
 //
@@ -40,20 +42,21 @@ import (
 // was actually gathered this reconcile (the render/apply/Conditions loop ran
 // to completion without error). When false — Reconcile aborted early, e.g. a
 // failed OIDC discovery or a failed apply before any component reported in —
-// Available/Progressing are deliberately left untouched rather than defaulted
-// to a fabricated healthy value: with zero fresh data, publishing "True" would
-// contradict the Degraded=True this same reconcile is about to report, and
-// would misrepresent an operand whose real state was never checked. Degraded
-// is always evaluated regardless, since a reconcile error is itself the signal.
-func aggregateStatus(cr *hyperfleetv1alpha1.HyperFleetConfig, componentConditions []metav1.Condition, componentsCollected bool, missingSecrets []string, reconcileErr error) bool {
+// Available/Progressing and status.components are deliberately left untouched
+// rather than defaulted to a fabricated healthy value: with zero fresh data,
+// publishing "True" would contradict the Degraded=True this same reconcile is
+// about to report, and would misrepresent an operand whose real state was
+// never checked. Degraded is always evaluated regardless, since a reconcile
+// error is itself the signal.
+func aggregateStatus(cr *hyperfleetv1alpha1.HyperFleetConfig, componentConditions []hyperfleetv1alpha1.ComponentConditions, componentsCollected bool, missingSecrets []string, reconcileErr error) bool {
 	changed := false
 
+	flat := flattenConditions(componentConditions)
 	conditions := []metav1.Condition{degradedCondition(missingSecrets, reconcileErr)}
 	if componentsCollected {
 		conditions = append(conditions,
-			rollupCondition(hyperfleetv1alpha1.ConditionAvailable, componentConditions,
-				hyperfleetv1alpha1.ReasonDeploymentAvailable, "all components are available"),
-			rollupProgressing(componentConditions),
+			rollupCondition(hyperfleetv1alpha1.ConditionAvailable, flat, hyperfleetv1alpha1.ReasonDeploymentAvailable, "all components are available", metav1.ConditionTrue),
+			rollupCondition(hyperfleetv1alpha1.ConditionProgressing, flat, hyperfleetv1alpha1.ReasonRolloutComplete, "all components have completed rollout", metav1.ConditionFalse),
 		)
 	}
 
@@ -64,22 +67,113 @@ func aggregateStatus(cr *hyperfleetv1alpha1.HyperFleetConfig, componentCondition
 		}
 	}
 
-	if componentsCollected && cr.Status.ObservedGeneration != cr.Generation {
-		cr.Status.ObservedGeneration = cr.Generation
-		changed = true
+	if componentsCollected {
+		if setComponentStatuses(cr, componentConditions) {
+			changed = true
+		}
+		if cr.Status.ObservedGeneration != cr.Generation {
+			cr.Status.ObservedGeneration = cr.Generation
+			changed = true
+		}
 	}
 
 	return changed
 }
 
-// rollupCondition ANDs every component condition of the given type: True only
-// when every reported condition of that type is True. The first non-True
-// condition's reason/message is surfaced. Absent any component conditions of
-// this type, it reports True with the supplied default reason/message
-// (vacuously true — there is nothing to be unavailable).
-func rollupCondition(condType string, componentConditions []metav1.Condition, trueReason, trueMessage string) metav1.Condition {
+// flattenConditions concatenates every component's conditions, preserving the
+// bundle's component order, so the rollup helpers can walk them as one list.
+func flattenConditions(componentConditions []hyperfleetv1alpha1.ComponentConditions) []metav1.Condition {
+	total := 0
+	for _, entry := range componentConditions {
+		total += len(entry.Conditions)
+	}
+	flat := make([]metav1.Condition, 0, total)
+	for _, entry := range componentConditions {
+		flat = append(flat, entry.Conditions...)
+	}
+	return flat
+}
+
+// setComponentStatuses publishes the per-component conditions to
+// status.components. Entries are rebuilt fresh each reconcile — sorted by
+// component name for deterministic output and pruned of condition types a
+// component no longer reports — while each condition's LastTransitionTime is
+// carried over from the previously published entry when its status is
+// unchanged, mirroring how meta.SetStatusCondition treats the top-level
+// conditions. It reports whether the published entries changed, so
+// Reconcile can skip a no-op Status().Update() call.
+func setComponentStatuses(cr *hyperfleetv1alpha1.HyperFleetConfig, componentConditions []hyperfleetv1alpha1.ComponentConditions) bool {
+	byName := func(a, b hyperfleetv1alpha1.ComponentConditions) int {
+		return strings.Compare(a.Name, b.Name)
+	}
+
+	// Build the new entry list: a sorted copy of the reports (the copy keeps
+	// the reorder and the per-entry rewrites below off the caller's slice),
+	// each component's conditions merged with its previously published entry.
+	entries := make([]hyperfleetv1alpha1.ComponentConditions, len(componentConditions))
+	copy(entries, componentConditions)
+	slices.SortFunc(entries, byName)
+	for i, entry := range entries {
+		var prevConds []metav1.Condition
+		// check for the previously published entry for this component, if any
+		if p := findComponentEntry(cr.Status.Components, entry.Name); p != nil {
+			prevConds = p.Conditions
+		}
+
+		// Rebuild the entry's condition list from the fresh report. Start by
+		// seeding it with the previously published conditions of the types
+		// still reported, so SetStatusCondition preserves their
+		// LastTransitionTime when the status has not changed; a type the
+		// component stopped reporting is not seeded and so is pruned. Then
+		// overlay the fresh conditions: unchanged statuses keep the carried
+		// timestamp, changed statuses get a new one.
+		freshTypes := make(map[string]struct{}, len(entry.Conditions))
+		for _, cond := range entry.Conditions {
+			freshTypes[cond.Type] = struct{}{}
+		}
+		conds := make([]metav1.Condition, 0, len(entry.Conditions))
+		for _, cond := range prevConds {
+			if _, ok := freshTypes[cond.Type]; ok {
+				conds = append(conds, cond)
+			}
+		}
+		for _, cond := range entry.Conditions {
+			cond.ObservedGeneration = cr.Generation
+			meta.SetStatusCondition(&conds, cond)
+		}
+		entries[i].Conditions = conds
+	}
+
+	// Compare old against new: any difference — an added or removed
+	// component, a name swap, or any condition change within an entry —
+	// means the published status changed and must be persisted. The old list
+	// is copied and sorted too, so the element-wise comparison does not
+	// depend on the order the API server returned it in.
+	prev := make([]hyperfleetv1alpha1.ComponentConditions, len(cr.Status.Components))
+	copy(prev, cr.Status.Components)
+	slices.SortFunc(prev, byName)
+	changed := !slices.EqualFunc(prev, entries, func(a, b hyperfleetv1alpha1.ComponentConditions) bool {
+		return a.Name == b.Name && slices.Equal(a.Conditions, b.Conditions)
+	})
+	cr.Status.Components = entries
+	return changed
+}
+
+// findComponentEntry returns the previously published status entry for the
+// named component, or nil if there is none.
+func findComponentEntry(entries []hyperfleetv1alpha1.ComponentConditions, name string) *hyperfleetv1alpha1.ComponentConditions {
+	for i := range entries {
+		if entries[i].Name == name {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+func rollupCondition(condType string, componentConditions []metav1.Condition, defaultReason, defaultMessage string, expectedConditionStatus metav1.ConditionStatus) metav1.Condition {
+	// Iterate through the component conditions and return the first condition that is not in the expected state.
 	for _, c := range componentConditions {
-		if c.Type == condType && c.Status != metav1.ConditionTrue {
+		if c.Type == condType && c.Status != expectedConditionStatus {
 			return metav1.Condition{
 				Type:    condType,
 				Status:  c.Status,
@@ -88,32 +182,13 @@ func rollupCondition(condType string, componentConditions []metav1.Condition, tr
 			}
 		}
 	}
+	// If all components are in the expected state, return a condition in that
+	// state with the generic reason/message.
 	return metav1.Condition{
 		Type:    condType,
-		Status:  metav1.ConditionTrue,
-		Reason:  trueReason,
-		Message: trueMessage,
-	}
-}
-
-// rollupProgressing ORs every component's Progressing condition: True if any
-// component reports Progressing=True.
-func rollupProgressing(componentConditions []metav1.Condition) metav1.Condition {
-	for _, c := range componentConditions {
-		if c.Type == hyperfleetv1alpha1.ConditionProgressing && c.Status == metav1.ConditionTrue {
-			return metav1.Condition{
-				Type:    hyperfleetv1alpha1.ConditionProgressing,
-				Status:  metav1.ConditionTrue,
-				Reason:  c.Reason,
-				Message: c.Message,
-			}
-		}
-	}
-	return metav1.Condition{
-		Type:    hyperfleetv1alpha1.ConditionProgressing,
-		Status:  metav1.ConditionFalse,
-		Reason:  hyperfleetv1alpha1.ReasonRolloutComplete,
-		Message: "all components have completed rollout",
+		Status:  expectedConditionStatus,
+		Reason:  defaultReason,
+		Message: defaultMessage,
 	}
 }
 
