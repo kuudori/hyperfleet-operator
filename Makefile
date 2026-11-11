@@ -274,16 +274,16 @@ install: manifests ## Install CRDs into the K8s cluster specified in ~/.kube/con
 	@$(KUSTOMIZE)  build config/crd | $(KUBECTL) apply -f -
 
 .PHONY: uninstall
-uninstall: manifests ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	@$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+uninstall: manifests ## Uninstall operator CRDs, preserving registration records. Call with ignore-not-found=true to ignore missing resources.
+	@$(KUSTOMIZE) build config/uninstall | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
 deploy: build-deployer ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	@$(KUBECTL) apply -f dist/install.yaml
 
 .PHONY: undeploy
-undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	@$(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f dist/install.yaml
+undeploy: ## Undeploy controller, preserving the registration CRD and records. Call with ignore-not-found=true to ignore missing resources.
+	@$(KUSTOMIZE) build config/undeploy | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 
 ##@ Bundles/Catalog
@@ -292,7 +292,7 @@ undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/confi
 # Non-olm installs
 # Generates dist/install.yaml
 # Install resources:  kubectl apply -f dist/install.yaml
-# Uninstall resources: kubectl delete -f dist/install.yaml
+# Uninstall resources: make undeploy (preserves the registration CRD and records)
 # Override images via env vars:
 #   make build-deployer RELATED_IMAGE_HYPERFLEET_OPERATOR=<op-img> RELATED_IMAGE_HYPERFLEET_API=<api-img> RELATED_IMAGE_HYPERFLEET_SENTINEL=<sentinel-img>
 

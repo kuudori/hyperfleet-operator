@@ -4,7 +4,7 @@
 
 Konflux uses a cascading build-nudge chain to keep operator, bundle, and catalog images in sync. Each stage triggers the next automatically:
 
-```
+```text
 operator image ──nudge──▶ bundle image ──nudge──▶ catalog image
 ```
 
@@ -65,6 +65,16 @@ Why the gate: the team rule is that a component nudges the bundle only if the op
 - Access to a Kubernetes v1.27.0+ cluster.
 
 ### Prerequisite steps
+
+The bundle includes both `HyperFleetConfig` and `ManagementClusterRegistration`
+as owned APIs. OLM installs and upgrades their CRDs with the operator; no separate
+registration bootstrap is required. The bundle also includes an unbound,
+registration-only administrator role. OLM separately aggregates owned-API access
+into generic `admin`, `edit` and `view` roles. Cluster-wide `admin`/`edit`
+principals are trusted registration administrators; namespace-only RoleBindings
+do not grant access to this cluster-scoped API. See
+[registration installation and lifecycle](managementclusterregistration-reference.md#olm-installation-and-lifecycle)
+for delegation and retention details.
 
 For local development and installation, set your Quay username to automatically configure image paths:
 
@@ -185,13 +195,16 @@ The catalog is defined by a single template, `catalog/konflux-template.yaml`, ho
     kubectl get hyperfleetconfig -o yaml > hyperfleetconfig-backup.yaml
     kubectl delete hyperfleetconfig --all
 
-    kubectl delete sub hyperfleet-operator -n <NAMESPACE>
-    kubectl delete csv hyperfleet-operator.v0.0.1 -n <NAMESPACE>
-    kubectl delete catalogsource hyperfleet-operator-catalog -n <NAMESPACE>
-    kubectl delete operatorgroup hyperfleet-operator-group -n <NAMESPACE>
-
-    # Uninstall OLM from your cluster
-    operator-sdk olm uninstall
+    # Subscription and CSV deletion retains CRDs and their records. Back up
+    # registrations first; any failure stops the sequence before the teardown
+    # below runs.
+    kubectl get managementclusterregistrations -o yaml > managementclusterregistrations-backup.tmp &&
+      mv managementclusterregistrations-backup.tmp managementclusterregistrations-backup.yaml &&
+      kubectl delete sub hyperfleet-operator -n <NAMESPACE> --ignore-not-found &&
+      kubectl delete csv hyperfleet-operator.v0.0.1 -n <NAMESPACE> --ignore-not-found &&
+      kubectl delete catalogsource hyperfleet-operator-catalog -n <NAMESPACE> --ignore-not-found &&
+      kubectl delete operatorgroup hyperfleet-operator-group -n <NAMESPACE> --ignore-not-found &&
+      operator-sdk olm uninstall
     ```
 
 > **TODO**: HYPERFLEET-1616: OLM V1 install
@@ -215,8 +228,16 @@ Quick testing with `operator-sdk run bundle` (no catalog needed).
     # Cleanup when done - IMPORTANT: Delete CRs before uninstalling operator
     kubectl delete hyperfleetconfig --all
 
-    # Uninstall hyperfleet-operator
-    operator-sdk cleanup hyperfleet-operator -n <NAMESPACE>
-    # Uninstall olm
-    operator-sdk olm uninstall
+    # operator-sdk cleanup deletes the CRDs the bundle owns, including the
+    # registration CRD, and destroys every registration record with it.
+    # Back up first; any failure stops the sequence before cleanup and the OLM
+    # uninstall.
+    kubectl get managementclusterregistrations -o yaml > managementclusterregistrations-backup.tmp &&
+      mv managementclusterregistrations-backup.tmp managementclusterregistrations-backup.yaml &&
+      operator-sdk cleanup hyperfleet-operator -n <NAMESPACE> &&
+      operator-sdk olm uninstall
+
+    # If cleanup succeeded but the OLM uninstall failed, rerun only
+    # `operator-sdk olm uninstall`: the registration CRD is already gone, so a
+    # rerun stops at the backup step above.
     ```

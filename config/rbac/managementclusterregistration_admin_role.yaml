@@ -1,0 +1,23 @@
+# Optional narrow delegation by a Hub cluster administrator. This role itself
+# does not aggregate; OLM separately aggregates access for the owned CRD.
+# Never bind registration write access to management-cluster identities.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: hyperfleet-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: managementclusterregistration-admin-role
+rules:
+- apiGroups:
+  - hyperfleet.redhat.com
+  resources:
+  - managementclusterregistrations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
