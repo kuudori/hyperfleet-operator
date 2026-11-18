@@ -14,6 +14,26 @@ not duplicated here.
 ## Prerequisites
 
 - Go 1.26.0, matching `go.mod`. Make defaults to `GOTOOLCHAIN=go1.26.0`, while honoring an explicit environment or command-line override. For direct `go` commands on a newer toolchain, use the same prefix; the pinned golangci-lint does not support Go 1.27.
+- FIPS mode is enabled only in the manager container image. Local builds and
+  tests do not enable it by default. The Dockerfile selects `GOFIPS140=v1.0.0`
+  and builds the whole `./cmd` package with `-tags=fips,no_openssl` so that
+  `cmd/fips.go` enables FIPS and rejects runtime attempts to disable it.
+  `no_openssl` selects Go's native crypto backend on Red Hat Go. The image build
+  checks the module, compiled FIPS default, and startup with `GOLANG_FIPS=1`.
+  The related-images validator is build-time tooling, not a shipped service.
+
+  Use `make test` for the non-E2E suite: it prepares `KUBEBUILDER_ASSETS` through
+  `setup-envtest` and excludes `test/e2e`. A direct
+  `go test ./...` does not perform that setup and also selects the E2E package.
+  Run live E2E separately with `make test-e2e` as described in
+  [End-to-end tests](#end-to-end-tests).
+
+  Do not set `fips140ems=0` through `GODEBUG`, `godebug` in `go.mod`/`go.work`,
+  or `//go:debug` in the main package: it disables TLS 1.2 EMS enforcement.
+  The Dockerfile rejects this compiled override even alongside `fips140=on`.
+  Neither that build check nor the runtime FIPS-mode guard detects a
+  deployment-time `GODEBUG=fips140ems=0` override; deployment configuration must
+  be reviewed separately.
 - Docker. The image and e2e targets are scaffolded and tested with Docker;
   alternative container tools are not assumed to work.
 - `envsubst` (provided by gettext) for development OLM bundle overlays.

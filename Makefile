@@ -12,12 +12,15 @@ OPERATOR_SDK_VERSION ?= v1.42.3
 # Match go.mod and the pinned tools. Environment and command-line overrides win.
 export GOTOOLCHAIN ?= go1.26.0
 
+# The Go command used by every recipe.
+GO ?= go
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 # Pass GOTOOLCHAIN explicitly to $(shell): Make 3.81 does not export it there.
-ifeq (,$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOBIN))
-GOBIN=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOPATH)/bin
+ifeq (,$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) env GOBIN))
+GOBIN=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) env GOPATH)/bin
 else
-GOBIN=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOBIN)
+GOBIN=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) env GOBIN)
 endif
 
 # Container tool (docker or podman)
@@ -36,7 +39,7 @@ ROOT_DIR := $(dir $(realpath $(firstword $(MAKEFILE_LIST))))
 
 # Tool versioning
 TOOL_MOD := $(ROOT_DIR)tools/go.mod
-gotool = go tool -modfile="$(TOOL_MOD)" $(1)
+gotool = $(GO) tool -modfile="$(TOOL_MOD)" $(1)
 
 # Tool shortcuts
 CONTROLLER_GEN := $(call gotool,controller-gen)
@@ -73,11 +76,11 @@ generate: ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
-	go fmt ./...
+	$(GO) fmt ./...
 
 .PHONY: vet
 vet: ## Run go vet against code.
-	go vet -tags=upgrade_e2e ./...
+	$(GO) vet -tags=upgrade_e2e ./...
 
 .PHONY: gofmt
 gofmt: fmt ## Alias for fmt (used by the hyperfleet-gofmt pre-commit hook).
@@ -90,7 +93,7 @@ install-hooks: ## Install pre-commit hooks.
 	pre-commit install
 
 ##@ Testing
-ENVTEST_K8S_VERSION ?= $(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
+ENVTEST_K8S_VERSION ?= $(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 KIND_CLUSTER ?= hyperfleet-operator-test-e2e
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
@@ -104,7 +107,7 @@ setup-envtest: $(LOCALBIN) ## Download the envtest binaries (etcd, kube-apiserve
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use '$(ENVTEST_K8S_VERSION)' --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v '/test/e2e$$') -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use '$(ENVTEST_K8S_VERSION)' --bin-dir $(LOCALBIN) -p path)" $(GO) test $$($(GO) list ./... | grep -v '/test/e2e$$') -coverprofile cover.out
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -122,7 +125,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
+	KIND_CLUSTER=$(KIND_CLUSTER) $(GO) test ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
@@ -144,7 +147,7 @@ test-e2e-upgrade: opm ## Test a published N-1 -> N OLM Classic upgrade on a prep
 		fi; \
 	done; \
 	test -n "$$ARTIFACT_DIR" || { echo "ARTIFACT_DIR is required" >&2; exit 1; }; \
-	UPGRADE_CLEANUP_ONLY=false go test -tags=upgrade_e2e ./test/e2e/upgrade -run '^TestOLMUpgrade$$' -count=1 -timeout=2h30m -v \
+	UPGRADE_CLEANUP_ONLY=false $(GO) test -tags=upgrade_e2e ./test/e2e/upgrade -run '^TestOLMUpgrade$$' -count=1 -timeout=2h30m -v \
 		-args -ginkgo.timeout=2h -ginkgo.junit-report="$$ARTIFACT_DIR/junit-upgrade.xml"
 
 .PHONY: cleanup-e2e-upgrade
@@ -155,7 +158,7 @@ cleanup-e2e-upgrade: ## Clean a retained upgrade run using its UID-bound ARTIFAC
 			printf -v "$$path_var" '%s/%s' "$$PWD" "$$path_value"; export "$$path_var"; \
 		fi; \
 	done; \
-	UPGRADE_CLEANUP_ONLY=true go test -tags=upgrade_e2e ./test/e2e/upgrade -run '^TestOLMUpgrade$$' -count=1 -timeout=45m -v \
+	UPGRADE_CLEANUP_ONLY=true $(GO) test -tags=upgrade_e2e ./test/e2e/upgrade -run '^TestOLMUpgrade$$' -count=1 -timeout=45m -v \
 		-args -ginkgo.timeout=15m
 
 ##@ Lint
@@ -193,7 +196,11 @@ test-disconnected-mirror: build-oc-mirror-image ## Test catalog archive import u
 
 .PHONY: build
 build: ## Build manager binary.
-	CGO_ENABLED=$(CGO_ENABLED) GOEXPERIMENT=$(GOEXPERIMENT) GOFIPS140=$(GOFIPS140) go build $(GOFLAGS) -ldflags="-s -w -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.version=$(APP_VERSION) -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.commit=$(GIT_SHA)" -o bin/manager cmd/main.go
+	$(GO) build $(GOFLAGS) -ldflags="-s -w -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.version=$(APP_VERSION) -X github.com/openshift-hyperfleet/hyperfleet-operator/internal/version.commit=$(GIT_SHA)" -o bin/manager ./cmd
+
+.PHONY: build-related-images-validator
+build-related-images-validator: ## Build the bundle validator (build-time tooling, not a shipped service).
+	$(GO) build $(GOFLAGS) -o bin/related-images-validator ./validators/related-images/
 
 # OPERATOR_NAMESPACE is the namespace the operator creates operands in. In-cluster
 # it comes from the downward API; for `make run` it defaults here so local dev works.
@@ -202,7 +209,7 @@ OPERATOR_NAMESPACE ?= hyperfleet-system
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	OPERATOR_NAMESPACE=$(OPERATOR_NAMESPACE) go run ./cmd/main.go
+	OPERATOR_NAMESPACE=$(OPERATOR_NAMESPACE) $(GO) run $(GOFLAGS) ./cmd
 
 
 ##@ Container Images
@@ -234,10 +241,9 @@ GIT_DIRTY ?= $(shell [ -z "$$(git status --porcelain 2>/dev/null)" ] || echo "-m
 
 # For container builds, use linux by default; override PLATFORM to build for other platforms (e.g. linux/arm64)
 
-# Go build flags (FIPS compliant)
+# FIPS mode is turned on only in the container image build. See the Dockerfile.
 CGO_ENABLED ?= 1
-GOEXPERIMENT ?= boringcrypto
-GOFIPS140 ?= off
+export CGO_ENABLED
 GOFLAGS ?= -trimpath
 # `make run` uses `go run` directly, so it won't embed APP_VERSION/GIT_SHA (see internal/version).
 
@@ -482,7 +488,7 @@ ifeq (, $(shell which operator-sdk 2>/dev/null))
 	@{ \
 	set -e ;\
 	mkdir -p $(dir $(OPERATOR_SDK)) ;\
-	OS=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOOS) && ARCH=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOARCH) && \
+	OS=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) env GOOS) && ARCH=$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) env GOARCH) && \
 	curl -sSLo $(OPERATOR_SDK) https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)/operator-sdk_$${OS}_$${ARCH} ;\
 	chmod +x $(OPERATOR_SDK) ;\
 	}
@@ -495,7 +501,7 @@ endif
 .PHONY: opm
 OPM = $(LOCALBIN)/opm
 OPM_VERSION ?= v1.55.0
-OPM_PLATFORM = $(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOOS)-$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOARCH)
+OPM_PLATFORM = $(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) env GOOS)-$(shell GOTOOLCHAIN="$(GOTOOLCHAIN)" $(GO) env GOARCH)
 # sha256 of the $(OPM_VERSION) release binaries, from the release's checksums.txt
 OPM_SHA256_linux-amd64 := eed05ce8d6c21bb4acf4683f270ea7fd69ecf492cb58459c5689575c80800921
 OPM_SHA256_linux-arm64 := 4048b965d25a96bdaca5c2ca4e45418ba286391f960708e774760c7abfa509ad
