@@ -18,8 +18,6 @@ package controller
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -414,7 +412,7 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 	}
 
 	// createReferencedSecrets creates every Secret the fixture CR (validHyperFleetConfig)
-	// references — the database Secret, the pinned JWKS Secret, and the broker
+	// references — the database Secret and the broker
 	// credential Secret — so scenarios about Deployment/rollout health are not
 	// incidentally also Degraded on a missing Secret.
 	createReferencedSecrets := func() {
@@ -429,15 +427,11 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 				apicomponent.SecretKeyDBPassword: []byte("password"),
 			},
 		}
-		jwksSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: testJWKSSecretName, Namespace: operatorNamespace},
-			Data:       map[string][]byte{apicomponent.SecretKeyJWKS: []byte(`{"keys":[]}`)},
-		}
 		brokerSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: sentinelcomponent.BrokerSecretName, Namespace: operatorNamespace},
 			Data:       map[string][]byte{sentinelcomponent.BrokerSecretKey: []byte("amqp://guest:guest@rabbitmq:5672/")},
 		}
-		for _, s := range []*corev1.Secret{dbSecret, jwksSecret, brokerSecret} {
+		for _, s := range []*corev1.Secret{dbSecret, brokerSecret} {
 			Expect(k8sClient.Create(ctx, s)).To(Succeed())
 			DeferCleanup(func(ctx context.Context, obj client.Object) {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, obj))).To(Succeed())
@@ -478,10 +472,10 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionProgressing).Reason).To(Equal(hyperfleetv1alpha1.ReasonRolloutComplete))
 	})
 
-	It("rolls only the components whose rendered ConfigMap changed", func() {
-		// api.auth.audience feeds only the API's config.yaml; sentinel config
-		// renders from the resource type, API URL, broker topic and the auth
-		// on/off switch, so changing the audience must leave every sentinel alone.
+	It("does not roll when only identityProviders changes (not yet consumed)", func() {
+		// identityProviders are validated but not yet consumed by any component,
+		// while audience is consumed by Sentinel (projected token audience).
+		// Changing identityProviders must not roll anything.
 		podHashes := func() (apiHash string, sentinelHashes map[string]string) {
 			GinkgoHelper()
 			dep := &appsv1.Deployment{}
@@ -512,29 +506,54 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 			}
 			return rvs
 		}
+		sentinelTokenAudience := func(rt string) string {
+			GinkgoHelper()
+			sDep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, operandKey(sentinelcomponent.ResourceName(rt)), sDep)).To(Succeed())
+			for _, v := range sDep.Spec.Template.Spec.Volumes {
+				if v.Projected != nil {
+					for _, src := range v.Projected.Sources {
+						if src.ServiceAccountToken != nil {
+							return src.ServiceAccountToken.Audience
+						}
+					}
+				}
+			}
+			return ""
+		}
 
 		By("reconciling to stamp the initial hashes")
 		doReconcile()
 		apiBefore, sentinelsBefore := podHashes()
 		rvsBefore := configMapRVs()
 
-		By("changing the API auth audience and reconciling")
+		By("changing identityProviders and reconciling")
 		cr := getCR()
-		cr.Spec.API.Auth.Audience = testAudience + "-changed"
+		cr.Spec.Authentication.IdentityProviders = append(cr.Spec.Authentication.IdentityProviders, hyperfleetv1alpha1.IdentityProvider{
+			Issuer: testIssuerURL + "-extra",
+			TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{
+				testTenancyOCID: {Claim: testTenancyOCID},
+			},
+		})
 		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
 		doReconcile()
 
-		By("verifying only the API ConfigMap was rewritten and only the API rolled")
+		By("verifying nothing rolled because identityProviders are not yet rendered")
 		apiAfter, sentinelsAfter := podHashes()
 		rvsAfter := configMapRVs()
-		Expect(apiAfter).NotTo(Equal(apiBefore), "the API config changed and must roll")
+		Expect(apiAfter).To(Equal(apiBefore), "identityProviders are not yet consumed so API must not roll")
 		Expect(sentinelsAfter).To(Equal(sentinelsBefore), "no sentinel config changed, so none may roll")
 		for name, rv := range rvsBefore {
-			if name == apicomponent.ConfigMapName {
-				Expect(rvsAfter[name]).NotTo(Equal(rv), "the API ConfigMap must be rewritten")
-			} else {
-				Expect(rvsAfter[name]).To(Equal(rv), "ConfigMap %q is unaffected and must not be rewritten", name)
-			}
+			Expect(rvsAfter[name]).To(Equal(rv), "ConfigMap %q is unaffected and must not be rewritten", name)
+		}
+
+		By("changing audience and reconciling: sentinel token audience updates")
+		cr = getCR()
+		cr.Spec.Authentication.Audience = testAudience + "-changed"
+		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+		doReconcile()
+		for _, rt := range sentinelResourceTypes {
+			Expect(sentinelTokenAudience(rt)).To(Equal(testAudience+"-changed"), "audience change must update Sentinel token volume for %q", rt)
 		}
 
 		By("reconciling with nothing changed: nothing rolls")
@@ -781,15 +800,16 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 	It("lists missing secrets in sorted, deduplicated order in the Degraded message", func() {
 		const prefix = "referenced secret(s) missing in the operator's namespace: "
 
-		// Components resolve in order: API (database, jwks) first, then one sentinel
+		// Components resolve in order: API (database) first, then one sentinel
 		// per entity, each referencing the same broker secret. Gathered in that order
-		// the roles are "database, jwks, broker, broker, ...", so only sorting puts
+		// the roles are "database, broker, broker, ...", so only sorting puts
 		// broker first and only deduplication keeps it from repeating.
+
 		By("reconciling with none of the referenced secrets present")
 		doReconcile()
 		degraded := conditionByType(getCR(), hyperfleetv1alpha1.ConditionDegraded)
 		Expect(degraded.Reason).To(Equal(hyperfleetv1alpha1.ReasonReferencedSecretMissing))
-		Expect(degraded.Message).To(Equal(prefix + "broker, database, jwks"))
+		Expect(degraded.Message).To(Equal(prefix + "broker, database"))
 
 		By("reconciling again: the message is identical, not reshuffled")
 		doReconcile()
@@ -807,32 +827,7 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 
 		doReconcile()
 		Expect(conditionByType(getCR(), hyperfleetv1alpha1.ConditionDegraded).Message).
-			To(Equal(prefix + "database, jwks"))
-	})
-
-	It("reports Degraded=True with ReferencedSecretMissing, not ReconcileError, when OIDC discovery also fails with an empty cache", func() {
-		By("pointing auth at an issuer whose discovery endpoint fails, on a fresh install with an empty discovery cache")
-		badDiscovery := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		DeferCleanup(badDiscovery.Close)
-		reconciler.HTTPClient = badDiscovery.Client()
-
-		cr := getCR()
-		cr.Spec.API.Auth.JWKCertSecretRef = nil
-		cr.Spec.API.Auth.Issuer = badDiscovery.URL
-		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
-
-		By("reconciling without creating the fixture's referenced database Secret, so both discovery and the Secret read fail")
-		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: typeNamespacedName})
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("resolve JWKS URL"))
-
-		By("verifying the missing Secret takes precedence over the discovery failure")
-		cr = getCR()
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Status).To(Equal(metav1.ConditionTrue))
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Reason).To(Equal(hyperfleetv1alpha1.ReasonReferencedSecretMissing))
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Message).To(ContainSubstring("database"))
+			To(Equal(prefix + "database"))
 	})
 
 	It("does not bump lastTransitionTime on a no-op reconcile", func() {
@@ -844,47 +839,6 @@ var _ = Describe("HyperFleetConfig Controller", func() {
 		doReconcile()
 
 		Expect(conditionByType(getCR(), hyperfleetv1alpha1.ConditionAvailable).LastTransitionTime).To(Equal(firstTransition))
-	})
-
-	It("reports Degraded=True but leaves Available/Progressing untouched when reconcile fails before any component reports", func() {
-		By("reconciling once so a real Available/Progressing value is already recorded")
-		createReferencedSecrets()
-		doReconcile()
-		cr := getCR()
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionAvailable).Status).To(Equal(metav1.ConditionFalse))
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionAvailable).Reason).To(Equal(hyperfleetv1alpha1.ReasonDeploymentUnavailable))
-		progressingBeforeFailure := conditionByType(cr, hyperfleetv1alpha1.ConditionProgressing)
-		observedGenerationBeforeFailure := cr.Status.ObservedGeneration
-
-		By("pointing auth at an issuer whose discovery endpoint fails, so OIDC discovery errors before any component ever runs")
-		badDiscovery := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		DeferCleanup(badDiscovery.Close)
-		reconciler.HTTPClient = badDiscovery.Client()
-
-		cr.Spec.API.Auth.JWKCertSecretRef = nil
-		cr.Spec.API.Auth.Issuer = badDiscovery.URL
-		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
-
-		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: typeNamespacedName})
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("resolve JWKS URL"))
-
-		By("verifying Degraded reflects the failure while Available is left at its last-recorded value, not fabricated healthy")
-		cr = getCR()
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Status).To(Equal(metav1.ConditionTrue))
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Reason).To(Equal(hyperfleetv1alpha1.ReasonReconcileError))
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Message).NotTo(ContainSubstring("500"),
-			"the Degraded message must not echo the raw wrapped error")
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionAvailable).Status).To(Equal(metav1.ConditionFalse),
-			"Available must remain at its last-recorded value, not be fabricated True")
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionAvailable).Reason).To(Equal(hyperfleetv1alpha1.ReasonDeploymentUnavailable))
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionProgressing).Status).To(Equal(progressingBeforeFailure.Status),
-			"Progressing must remain at its last-recorded value when reconcile fails before any component reports")
-		Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionProgressing).Reason).To(Equal(progressingBeforeFailure.Reason))
-		Expect(cr.Status.ObservedGeneration).To(Equal(observedGenerationBeforeFailure),
-			"top-level observedGeneration must stay pinned to the last fully processed generation")
 	})
 
 	It("returns a wrapped error when the operand namespace is absent", func() {

@@ -196,7 +196,7 @@ func TestAggregateStatusComponentsNotCollectedLeavesAvailableProgressingUnset(t 
 	cr := &hyperfleetv1alpha1.HyperFleetConfig{}
 	cr.Generation = 1
 
-	changed := aggregateStatus(cr, nil, false, nil, errors.New("resolve JWKS URL: boom"))
+	changed := aggregateStatus(cr, nil, false, nil, errors.New("apply component \"api\": boom"))
 	g.Expect(changed).To(BeTrue(), "Degraded must still be written")
 
 	g.Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionDegraded).Status).To(Equal(metav1.ConditionTrue))
@@ -290,9 +290,9 @@ func TestAggregateStatusComponentsNotCollectedPreservesPriorAvailable(t *testing
 	g.Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionAvailable).Status).To(Equal(metav1.ConditionTrue))
 
 	// A later reconcile fails before reaching any component (e.g. a transient
-	// OIDC discovery blip): Available must remain exactly as last recorded.
+	// transient apply failure): Available must remain exactly as last recorded.
 	cr.Generation = 2
-	aggregateStatus(cr, nil, false, nil, errors.New("resolve JWKS URL: boom"))
+	aggregateStatus(cr, nil, false, nil, errors.New("apply component \"api\": boom"))
 
 	g.Expect(conditionByType(cr, hyperfleetv1alpha1.ConditionAvailable).Status).To(Equal(metav1.ConditionTrue),
 		"a failed reconcile that never reached the components must not change the last-known Available value")

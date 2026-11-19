@@ -35,7 +35,6 @@ import (
 	"k8s.io/utils/ptr"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
-	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/api"
 )
 
 const (
@@ -157,11 +156,12 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace, resou
 		})
 	}
 
-	volumeMounts := []corev1.VolumeMount{
-		{Name: configVolume, MountPath: configMountPath, SubPath: ConfigFileKey, ReadOnly: true},
-		{Name: brokerConfigVolume, MountPath: brokerConfigMountPath, SubPath: BrokerConfigFileKey, ReadOnly: true},
-		{Name: tmpVolume, MountPath: "/tmp"},
-	}
+	volumeMounts := make([]corev1.VolumeMount, 0, 4)
+	volumeMounts = append(volumeMounts,
+		corev1.VolumeMount{Name: configVolume, MountPath: configMountPath, SubPath: ConfigFileKey, ReadOnly: true},
+		corev1.VolumeMount{Name: brokerConfigVolume, MountPath: brokerConfigMountPath, SubPath: BrokerConfigFileKey, ReadOnly: true},
+		corev1.VolumeMount{Name: tmpVolume, MountPath: "/tmp"},
+	)
 
 	volumes := []corev1.Volume{
 		{
@@ -184,18 +184,15 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace, resou
 			Name:         tmpVolume,
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
-	}
-
-	if api.AuthEnabled(cr) {
-		volumes = append(volumes, corev1.Volume{
-			Name: "hyperfleet-api-token",
+		{
+			Name: apiTokenVolume,
 			VolumeSource: corev1.VolumeSource{
 				Projected: &corev1.ProjectedVolumeSource{
 					DefaultMode: ptr.To[int32](0444),
 					Sources: []corev1.VolumeProjection{
 						{
 							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-								Audience:          cr.Spec.API.Auth.Audience,
+								Audience:          audienceForToken(cr),
 								ExpirationSeconds: ptr.To[int64](3600),
 								Path:              ServiceAccountTokenFileName,
 							},
@@ -203,14 +200,14 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace, resou
 					},
 				},
 			},
-		})
-
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "hyperfleet-api-token",
-			MountPath: ServiceAccountTokenPath,
-			ReadOnly:  true,
-		})
+		},
 	}
+
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		Name:      apiTokenVolume,
+		MountPath: ServiceAccountTokenPath,
+		ReadOnly:  true,
+	})
 
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
@@ -319,6 +316,13 @@ func brokerConfigMap(crName, namespace, resourceType, brokerYAML string) *corev1
 			BrokerConfigFileKey: brokerYAML,
 		},
 	}
+}
+
+func audienceForToken(cr *hyperfleetv1alpha1.HyperFleetConfig) string {
+	if cr.Spec.Authentication.Audience != "" {
+		return cr.Spec.Authentication.Audience
+	}
+	return hyperfleetv1alpha1.DefaultAuthenticationAudience
 }
 
 // networkPolicy denies all ingress and leaves egress unrestricted: no Service

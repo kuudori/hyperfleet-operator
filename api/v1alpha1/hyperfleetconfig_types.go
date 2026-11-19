@@ -32,6 +32,8 @@ import (
 // (see architecture ADR-0019).
 const SingletonName = "cluster"
 
+const DefaultAuthenticationAudience = "hyperfleet-api"
+
 // BundleType selects one of the operator-internal bundle definitions. It is a
 // selector only: the CR carries the choice of a bundle, never its contents. The
 // bundle controller (HYPERFLEET-1407) resolves the selected bundle into a
@@ -123,11 +125,9 @@ const (
 	// convention default).
 	ReasonAsExpected = "AsExpected"
 	// ReasonReferencedSecretMissing: Degraded=True — a Secret referenced by the
-	// spec (database, TLS, or JWKS) does not exist in the operator's namespace.
+	// spec (database or TLS) does not exist in the operator's namespace.
 	ReasonReferencedSecretMissing = "ReferencedSecretMissing"
-	// ReasonReconcileError: Degraded=True — a component failed to render or
-	// apply, or JWKS discovery failed with no cached fallback available, during
-	// the most recent reconcile.
+	// ReasonReconcileError: Degraded=True — a component failed to render or apply during the most recent reconcile.
 	ReasonReconcileError = "ReconcileError"
 )
 
@@ -176,63 +176,74 @@ type DatabaseSpec struct {
 	SecretRef SecretReference `json:"secretRef"`
 }
 
-// AuthSpec configures partner-facing JWT authentication intent for the API.
-// Machinery details (JWKS rotation, public-path allowlist) remain
-// operator-internal defaults and are not exposed here.
+// TenantDimensionSource defines the source of a tenant dimension value: a JWT claim or a fixed value. Exactly one of claim or value must be set. This field name and its semantics are a v1alpha1 compatibility commitment.
 //
-// The JWKS source is optional partner intent: for air-gapped or private
-// environments, a partner may supply the key set from a Secret
-// (jwkCertSecretRef). When unset, the operator derives the JWKS URL from the
-// issuer via OIDC discovery — see HYPERFLEET-1408. A pinned-URL override
-// (jwkCertURL) was considered and deliberately left out of v1alpha1: every
-// field here is a long-term compatibility commitment (ADR-0019's CR-minimalism
-// principle), discovery already covers any standards-compliant issuer, and
-// in-app JWT validation is itself defense-in-depth behind the API gateway
-// (ADR-0020) — not a case that obviously needs a third configuration knob.
-// Adding it later is compatible with existing CRs; removing it would not be.
-//
-// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.issuer) && has(self.audience))",message="issuer and audience are required when auth is enabled"
-type AuthSpec struct {
-	// enabled turns JWT authentication on for the API endpoint. It defaults to
-	// true, so a config that omits it gets authentication ON. It is a pointer to
-	// distinguish "unset" (apply the default, true) from an explicit false
-	// (disable auth), which a non-pointer bool cannot express: with omitempty a
-	// plain false is dropped and re-defaulted to true, so auth could never be
-	// turned off via the typed client; without omitempty an unset field serializes
-	// as false and suppresses the default. Only *bool avoids both traps.
-	//
-	// +kubebuilder:default=true
-	// +optional
-	Enabled *bool `json:"enabled,omitempty"`
-
-	// issuer is the OIDC issuer URL that mints accepted tokens. Required when
-	// enabled is true. Whenever it is set (regardless of enabled) it must be a
-	// valid https URL with a host, so a malformed issuer is rejected at admission
-	// rather than surfacing later at token-validation time.
+// +kubebuilder:validation:XValidation:rule="(has(self.claim) && size(self.claim) != 0 && (!has(self.value) || size(self.value) == 0)) || ((!has(self.claim) || size(self.claim) == 0) && has(self.value) && size(self.value) != 0)",message="exactly one of claim or value must be set"
+type TenantDimensionSource struct {
+	// claim is the JWT claim to read this dimension from. Mutually exclusive with value. This field name and its semantics are a v1alpha1 compatibility commitment.
 	//
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getScheme() == 'https' && url(self).getHostname() != ''",message="issuer must be a valid https URL"
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	// +optional
-	Issuer string `json:"issuer,omitempty"`
+	Claim string `json:"claim,omitempty"`
 
-	// audience is the token audience the API requires. Required and non-empty
-	// when enabled is true.
+	// value is a fixed dimension value for this provider. Mutually exclusive with claim. Use for identity domains where claims are untrusted. This field name and its semantics are a v1alpha1 compatibility commitment.
 	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
+	// +optional
+	Value string `json:"value,omitempty"`
+}
+
+// IdentityProvider declares an external OIDC identity provider whose tokens HyperFleet accepts. The issuer is the list key. This field name and its semantics are a v1alpha1 compatibility commitment.
+type IdentityProvider struct {
+	// issuer is the OIDC issuer URL, matched against the token's `iss` claim. It must be a valid https URL with a host and without query, fragment or trailing slash. This field name and its semantics are a v1alpha1 compatibility commitment.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getScheme() == 'https' && url(self).getHostname() != ''",message="issuer must be a valid https URL with a host"
+	// +kubebuilder:validation:XValidation:rule="!self.contains('?') && !self.contains('#')",message="issuer must not contain a query or a fragment"
+	// +kubebuilder:validation:XValidation:rule="!self.endsWith('/')",message="issuer must not end with a trailing slash"
+	Issuer string `json:"issuer"`
+
+	// identityClaim is the JWT claim that identifies the caller. Defaults to "sub" when omitted. This field name and its semantics are a v1alpha1 compatibility commitment.
+	//
+	// +kubebuilder:default="sub"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
+	// +optional
+	IdentityClaim string `json:"identityClaim,omitempty"`
+
+	// tenantDimensions overrides the source of each tenant dimension for this provider. Unlisted dimensions use the bundle preset. This field name and its semantics are a v1alpha1 compatibility commitment.
+	//
+	// +kubebuilder:validation:MaxProperties=8
+	// +kubebuilder:validation:XValidation:rule="self.all(x, x.matches('^[A-Za-z0-9._-]{1,63}$'))",message="dimension name must match ^[A-Za-z0-9._-]{1,63}$"
+	// +optional
+	TenantDimensions map[string]TenantDimensionSource `json:"tenantDimensions,omitempty"`
+}
+
+// AuthenticationSpec declares the token audience and the accepted identity providers. This field name and its semantics are a v1alpha1 compatibility commitment.
+type AuthenticationSpec struct {
+	// audience is the token audience HyperFleet requires. Defaults to "hyperfleet-api" when omitted. This field name and its semantics are a v1alpha1 compatibility commitment.
+	//
+	// +kubebuilder:default="hyperfleet-api"
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	Audience string `json:"audience,omitempty"`
 
-	// jwkCertSecretRef optionally references a Secret holding the JWKS document,
-	// for air-gapped or private environments where the API cannot reach a JWKS
-	// URL. The Secret must provide the key "jwks.json" containing a JSON Web Key
-	// Set (the format the API parses; see HYPERFLEET-1408). When unset, the
-	// operator derives the JWKS URL from the issuer via OIDC discovery
-	// ({issuer}/.well-known/openid-configuration → jwks_uri).
+	// identityProviders lists accepted identity providers, keyed by issuer. This field name and its semantics are a v1alpha1 compatibility commitment.
 	//
-	// +optional
-	JWKCertSecretRef *SecretReference `json:"jwkCertSecretRef,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=map
+	// +listMapKey=issuer
+	IdentityProviders []IdentityProvider `json:"identityProviders"`
 }
 
 // TLSSpec configures TLS for the API endpoint. The certificate material is
@@ -252,11 +263,6 @@ type APISpec struct {
 	//
 	// +kubebuilder:validation:Required
 	Database DatabaseSpec `json:"database"`
-
-	// auth configures partner-facing JWT authentication intent.
-	//
-	// +kubebuilder:validation:Required
-	Auth AuthSpec `json:"auth"`
 
 	// tls optionally configures TLS for the API endpoint. When omitted, the
 	// operator applies its default serving configuration.
@@ -287,6 +293,11 @@ type HyperFleetConfigSpec struct {
 	//
 	// +kubebuilder:validation:Required
 	API APISpec `json:"api"`
+
+	// authentication declares the token audience and accepted identity providers. This field name and its semantics are a v1alpha1 compatibility commitment.
+	//
+	// +kubebuilder:validation:Required
+	Authentication AuthenticationSpec `json:"authentication"`
 }
 
 // ComponentConditions is the observed health of a single bundle component,

@@ -37,6 +37,15 @@ const RelatedImageEnv = "RELATED_IMAGE_HYPERFLEET_API"
 // HYPERFLEET_DATABASE_*_FILE variables (v0.4.0+).
 const DefaultImage = "quay.io/redhat-services-prod/hyperfleet-tenant/hyperfleet/hyperfleet-api:0.4.0"
 
+// JWTOptions is internal JWT wiring. The API cannot start with JWT enabled and no issuer or JWKS, so JWT stays nil until the bundle supplies them.
+// Temporary until HYPERFLEET-1534 decides how the bundle provides these.
+type JWTOptions struct {
+	IssuerURL      string
+	Audience       string
+	JWKCertURL     string
+	JWKSSecretName string
+}
+
 // Component renders the HyperFleet API operand. It satisfies the bundle.Component
 // contract structurally (no import of internal/bundle, avoiding an import cycle:
 // bundle imports this package). It carries only rendering inputs and never
@@ -50,11 +59,7 @@ type Component struct {
 	// config.yaml. It is supplied by internal/bundle, which owns the
 	// per-bundle entity sets; an empty list renders no `entities:` key.
 	Entities []EntityDescriptor
-	// ResolvedJWKSURL is the JWKS URL derived by the controller via OIDC
-	// discovery, used only when auth is enabled and the CR pins neither a JWKS
-	// URL nor a JWKS Secret. Discovery is a network read, so it cannot happen in
-	// the pure renderer; the controller resolves it and injects the result here.
-	ResolvedJWKSURL string
+	JWT      *JWTOptions
 }
 
 // Options carries the non-image, non-namespace inputs to New. It is a struct so
@@ -63,6 +68,7 @@ type Component struct {
 type Options struct {
 	// Entities is the bundle-specific entity registration list.
 	Entities []EntityDescriptor
+	JWT      *JWTOptions
 }
 
 // New constructs the API component for the given image and operator namespace.
@@ -71,6 +77,7 @@ func New(image, namespace string, opts Options) *Component {
 		Image:     image,
 		Namespace: namespace,
 		Entities:  opts.Entities,
+		JWT:       opts.JWT,
 	}
 }
 
@@ -91,7 +98,7 @@ func (c *Component) Rollout() component.RolloutTarget {
 }
 
 // ReferencedSecrets returns the Secrets the API pods consume. The database
-// Secret is always referenced; TLS and JWKS Secrets are conditional on the CR.
+// Secret is always referenced; TLS and JWKS Secrets are conditional.
 func (c *Component) ReferencedSecrets(cr *hyperfleetv1alpha1.HyperFleetConfig) []component.SecretReference {
 	refs := []component.SecretReference{
 		{Role: "database", SecretName: cr.Spec.API.Database.SecretRef.Name},
@@ -102,10 +109,10 @@ func (c *Component) ReferencedSecrets(cr *hyperfleetv1alpha1.HyperFleetConfig) [
 			SecretName: cr.Spec.API.TLS.SecretRef.Name,
 		})
 	}
-	if AuthEnabled(cr) && cr.Spec.API.Auth.JWKCertSecretRef != nil {
+	if c.JWT != nil && c.JWT.JWKSSecretName != "" {
 		refs = append(refs, component.SecretReference{
 			Role:       "jwks",
-			SecretName: cr.Spec.API.Auth.JWKCertSecretRef.Name,
+			SecretName: c.JWT.JWKSSecretName,
 		})
 	}
 	return refs
@@ -115,7 +122,7 @@ func (c *Component) ReferencedSecrets(cr *hyperfleetv1alpha1.HyperFleetConfig) [
 // dependency-friendly order (identity and RBAC before the workload that uses
 // them). It is a pure function of its inputs: no cluster reads or writes.
 //
-// The config.yaml content, database env, and conditional TLS/JWKS mounts are
+// The config.yaml content, database env, and conditional TLS mounts are
 // derived from the CR spec here (HYPERFLEET-1408). The content-hash rollout
 // annotation is NOT set here — it depends on referenced Secret *data*, which
 // only the controller can read; the controller stamps it after Render. The ctx
@@ -126,15 +133,28 @@ func (c *Component) Render(_ context.Context, cr *hyperfleetv1alpha1.HyperFleetC
 		image = DefaultImage
 	}
 
-	jwkURL, jwkFile := c.resolveJWKSource(cr)
+	jwtEnabled := c.JWT != nil
+	var jwtIssuer, jwtAudience, jwkURL, jwkFile string
+	if jwtEnabled {
+		jwtIssuer = c.JWT.IssuerURL
+		jwtAudience = c.JWT.Audience
+		if jwtAudience == "" {
+			jwtAudience = cr.Spec.Authentication.Audience
+			if jwtAudience == "" {
+				jwtAudience = hyperfleetv1alpha1.DefaultAuthenticationAudience
+			}
+		}
+		jwkURL, jwkFile = c.resolveJWKSource()
+	}
+
 	configYAML, err := renderConfig(configInput{
-		AuthEnabled: AuthEnabled(cr),
-		Issuer:      cr.Spec.API.Auth.Issuer,
-		Audience:    cr.Spec.API.Auth.Audience,
-		JWKCertURL:  jwkURL,
-		JWKCertFile: jwkFile,
 		TLSEnabled:  cr.Spec.API.TLS != nil,
 		Entities:    c.Entities,
+		JWTEnabled:  jwtEnabled,
+		Issuer:      jwtIssuer,
+		Audience:    jwtAudience,
+		JWKCertURL:  jwkURL,
+		JWKCertFile: jwkFile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("render api config: %w", err)
@@ -146,17 +166,18 @@ func (c *Component) Render(_ context.Context, cr *hyperfleetv1alpha1.HyperFleetC
 		roleBinding(cr, c.Namespace),
 		configMap(cr, c.Namespace, configYAML),
 		service(cr, c.Namespace),
-		deployment(cr, image, c.Namespace),
+		c.deployment(cr, image, c.Namespace),
 	}, nil
 }
 
-// AuthEnabled reports whether JWT auth is on. The CRD defaults enabled to true,
-// so a nil pointer (field omitted) means enabled — matching the schema default
-// rather than Go's zero value. Exported so the controller applies the identical
-// default when deciding whether to perform OIDC discovery.
-func AuthEnabled(cr *hyperfleetv1alpha1.HyperFleetConfig) bool {
-	e := cr.Spec.API.Auth.Enabled
-	return e == nil || *e
+func (c *Component) resolveJWKSource() (url, file string) {
+	if c.JWT == nil {
+		return "", ""
+	}
+	if c.JWT.JWKSSecretName != "" {
+		return "", jwksFilePath
+	}
+	return c.JWT.JWKCertURL, ""
 }
 
 // TLSEnabled reports whether the CR enables TLS on the API listener.
@@ -170,22 +191,6 @@ func TLSEnabled(cr *hyperfleetv1alpha1.HyperFleetConfig) bool {
 // (hyperfleet-api.<namespace>.svc); see the CR reference's TLS section.
 func APIBaseURL(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) string {
 	return fmt.Sprintf("%s://%s.%s.svc:%d", apiScheme(cr), ResourceName, namespace, portHTTP)
-}
-
-// resolveJWKSource picks the single JWKS source for the config file: a mounted
-// CR Secret (a file path) when jwkCertSecretRef is set, else the
-// controller-supplied OIDC-discovered URL. It returns (url, file) with at most
-// one non-empty, and ("", "") when auth is disabled. When auth is on and
-// neither resolves (discovery not yet run), both are empty and renderConfig
-// reports the wiring error.
-func (c *Component) resolveJWKSource(cr *hyperfleetv1alpha1.HyperFleetConfig) (url, file string) {
-	if !AuthEnabled(cr) {
-		return "", ""
-	}
-	if cr.Spec.API.Auth.JWKCertSecretRef != nil {
-		return "", jwksFilePath
-	}
-	return c.ResolvedJWKSURL, ""
 }
 
 // Conditions reports the component's health as metav1.Conditions, derived from

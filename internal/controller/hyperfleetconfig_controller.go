@@ -20,9 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -70,30 +68,6 @@ type HyperFleetConfigReconciler struct {
 	// Contains ProjectId which maps to BROKER_GOOGLEPUBSUB_PROJECT_ID
 	// which is only required when broker type is googlepubsub
 	BrokerInfo *sentinel.BrokerInfo
-
-	// HTTPClient performs OIDC discovery requests. Nil falls back to a lazily-built,
-	// reused hardened default client (see discoverJWKSURL/discoveryClientOnce);
-	// tests inject one pointed at an httptest server, bypassing that default
-	// entirely.
-	HTTPClient *http.Client
-
-	// discoveryClientOnce/discoveryClient lazily construct the default discovery
-	// client exactly once per reconciler instance, so repeated reconciles reuse
-	// one http.Transport (and its connection pool) instead of leaking a fresh one
-	// per call — a fresh net.Dialer-backed Transport has IdleConnTimeout's zero
-	// value (no limit), so discarding it after one request never closes whatever
-	// connection it opened.
-	discoveryClientOnce sync.Once
-	discoveryClient     *http.Client
-
-	// discoveryCacheMu guards discoveryCache.
-	discoveryCacheMu sync.Mutex
-	// discoveryCache holds the last successfully discovered jwks_uri per issuer,
-	// so a transient IdP outage degrades to "keep using the last-known key
-	// endpoint" rather than blocking every reconcile — including ones triggered
-	// by an unrelated Secret rotation — on that issuer being reachable. See
-	// resolveJWKSURL.
-	discoveryCache map[string]string
 }
 
 // +kubebuilder:rbac:groups=hyperfleet.redhat.com,resources=hyperfleetconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -109,7 +83,7 @@ type HyperFleetConfigReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch,namespace=hyperfleet-system
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete,namespace=hyperfleet-system
 // Secrets are referenced (not owned): the operator reads partner-provided
-// database/TLS/JWKS Secrets to compute the config-rollout hash and watches them
+// database/TLS Secrets to compute the config-rollout hash and watches them
 // so a rotation re-triggers reconcile. get;list;watch only — the operator never
 // writes them. Namespaced (not a ClusterRole rule): every referenced Secret
 // lives in the operator's own namespace (see SecretReference), matching the
@@ -166,8 +140,7 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}()
 
 	// Resolve the bundle first so components can declare their referenced
-	// Secrets via ReferencedSecrets. ResolvedJWKSURL is set after OIDC
-	// discovery below, before Render.
+	// Secrets via ReferencedSecrets.
 	components, err := bundle.Resolve(cr.Spec.Bundle, bundle.Config{
 		APIImage:      r.APIImage,
 		SentinelImage: r.SentinelImage,
@@ -186,9 +159,7 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Degraded condition. A rotation bumps resourceVersion, so without hashing
 	// it the pods would keep running with stale credentials/certs. A missing
 	// Secret is not fatal — it is hashed as absent so the pods roll once the
-	// Secret appears — but it does drive the Degraded condition. This runs
-	// before OIDC discovery so a missing Secret still takes precedence in
-	// degradedCondition even when discovery also fails in the same reconcile.
+	// Secret appears — but it does drive the Degraded condition.
 	componentEntries := make(map[string][]hashEntry, len(components))
 	for _, comp := range components {
 		refs := comp.ReferencedSecrets(cr)
@@ -208,16 +179,6 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// message is deterministic and does not flip-flop on repeated reconciles.
 	slices.Sort(missingSecrets)
 	missingSecrets = slices.Compact(missingSecrets)
-
-	// Resolve the JWKS URL. When auth is on and the CR pins neither a JWKS URL nor
-	// a JWKS Secret, this performs OIDC discovery — a network read, so it lives
-	// here rather than in the pure renderer. Empty otherwise.
-	jwksURL, err := r.resolveJWKSURL(ctx, cr)
-	if err != nil {
-		metrics.IncReconcileError("discovery")
-		return ctrl.Result{}, fmt.Errorf("resolve JWKS URL: %w", err)
-	}
-	bundle.SetResolvedJWKSURL(components, jwksURL)
 
 	componentConfigHashes := make([]string, 0, len(components))
 	for _, component := range components {
@@ -277,7 +238,7 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// Publish the digest of the config we just applied: the spec plus every
 	// component's config-rollout hash, so a Secret rotation or resolved-value
-	// drift (e.g. OIDC discovery) shows up here even when the spec itself did not
+	// drift shows up here even when the spec itself did not
 	// change.
 	metrics.SetAppliedConfigHash(hashConfig(cr.Spec, componentConfigHashes))
 	// TODO(HYPERFLEET-1512): enforce that referenced Secrets exist in
@@ -293,7 +254,7 @@ func (r *HyperFleetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // HyperFleetConfig and every operand type it owns, so an out-of-band change to
 // any operand re-invokes Reconcile and the desired state is re-applied. It also
 // watches Secrets (which it references but does not own) so a rotation of a
-// referenced database/TLS/JWKS Secret re-triggers reconcile and rolls the pods.
+// referenced database/TLS Secret re-triggers reconcile and rolls the pods.
 func (r *HyperFleetConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&hyperfleetv1alpha1.HyperFleetConfig{})

@@ -184,7 +184,7 @@ func apiContainerSecurityContext() *corev1.SecurityContext {
 // configuration as serve, so a fresh partner-provided database is ready before
 // the API accepts requests. The config-hash pod-template annotation is added
 // later by the controller, not here.
-func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace string) *appsv1.Deployment {
+func (c *Component) deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace string) *appsv1.Deployment {
 	dbSecret := cr.Spec.API.Database.SecretRef.Name
 
 	// Base env: config file location plus the five database credential file
@@ -246,21 +246,14 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace string
 		})
 	}
 
-	// JWKS: mount the JWKS Secret read-only only when auth is enabled AND the CR
-	// pins a Secret source (jwkCertSecretRef); the jwks.json key surfaces as the
-	// file config.yaml's jwk_cert_file points at. The URL and OIDC-discovery paths
-	// need no mount. The AuthEnabled guard matches resolveJWKSource (api.go) and
-	// referencedSecretData (rollout.go): with auth off the API never reads the JWKS
-	// file, so mounting it would inject an unused Secret and, if that Secret is
-	// absent, fail pod start despite auth being disabled.
-	if AuthEnabled(cr) && cr.Spec.API.Auth.JWKCertSecretRef != nil {
+	if c.JWT != nil && c.JWT.JWKSSecretName != "" {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name: jwksVolume, MountPath: jwksMountPath, ReadOnly: true,
 		})
 		volumes = append(volumes, corev1.Volume{
 			Name: jwksVolume,
 			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: cr.Spec.API.Auth.JWKCertSecretRef.Name},
+				Secret: &corev1.SecretVolumeSource{SecretName: c.JWT.JWKSSecretName},
 			},
 		})
 	}

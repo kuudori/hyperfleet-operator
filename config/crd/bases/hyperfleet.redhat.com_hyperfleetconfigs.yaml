@@ -69,68 +69,6 @@ spec:
                 description: api is the partner-facing configuration for the HyperFleet
                   API component.
                 properties:
-                  auth:
-                    description: auth configures partner-facing JWT authentication
-                      intent.
-                    properties:
-                      audience:
-                        description: |-
-                          audience is the token audience the API requires. Required and non-empty
-                          when enabled is true.
-                        maxLength: 253
-                        minLength: 1
-                        type: string
-                      enabled:
-                        default: true
-                        description: |-
-                          enabled turns JWT authentication on for the API endpoint. It defaults to
-                          true, so a config that omits it gets authentication ON. It is a pointer to
-                          distinguish "unset" (apply the default, true) from an explicit false
-                          (disable auth), which a non-pointer bool cannot express: with omitempty a
-                          plain false is dropped and re-defaulted to true, so auth could never be
-                          turned off via the typed client; without omitempty an unset field serializes
-                          as false and suppresses the default. Only *bool avoids both traps.
-                        type: boolean
-                      issuer:
-                        description: |-
-                          issuer is the OIDC issuer URL that mints accepted tokens. Required when
-                          enabled is true. Whenever it is set (regardless of enabled) it must be a
-                          valid https URL with a host, so a malformed issuer is rejected at admission
-                          rather than surfacing later at token-validation time.
-                        maxLength: 2048
-                        minLength: 1
-                        type: string
-                        x-kubernetes-validations:
-                        - message: issuer must be a valid https URL
-                          rule: isURL(self) && url(self).getScheme() == 'https' &&
-                            url(self).getHostname() != ''
-                      jwkCertSecretRef:
-                        description: |-
-                          jwkCertSecretRef optionally references a Secret holding the JWKS document,
-                          for air-gapped or private environments where the API cannot reach a JWKS
-                          URL. The Secret must provide the key "jwks.json" containing a JSON Web Key
-                          Set (the format the API parses; see HYPERFLEET-1408). When unset, the
-                          operator derives the JWKS URL from the issuer via OIDC discovery
-                          ({issuer}/.well-known/openid-configuration → jwks_uri).
-                        properties:
-                          name:
-                            description: |-
-                              name is the name of the Secret in the operator's namespace. It must be a
-                              valid DNS-1123 subdomain, matching what k8s.io/apimachinery/pkg/util/validation
-                              enforces for Secret names (IsDNS1123Subdomain, max length 253), so an
-                              unresolvable reference is rejected at admission rather than failing opaquely
-                              when the reference is later resolved.
-                            maxLength: 253
-                            minLength: 1
-                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                            type: string
-                        required:
-                        - name
-                        type: object
-                    type: object
-                    x-kubernetes-validations:
-                    - message: issuer and audience are required when auth is enabled
-                      rule: '!self.enabled || (has(self.issuer) && has(self.audience))'
                   database:
                     description: database configures the external PostgreSQL connection.
                     properties:
@@ -194,8 +132,111 @@ spec:
                     - secretRef
                     type: object
                 required:
-                - auth
                 - database
+                type: object
+              authentication:
+                description: authentication declares the token audience and accepted
+                  identity providers. This field name and its semantics are a v1alpha1
+                  compatibility commitment.
+                properties:
+                  audience:
+                    default: hyperfleet-api
+                    description: audience is the token audience HyperFleet requires.
+                      Defaults to "hyperfleet-api" when omitted. This field name and
+                      its semantics are a v1alpha1 compatibility commitment.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  identityProviders:
+                    description: identityProviders lists accepted identity providers,
+                      keyed by issuer. This field name and its semantics are a v1alpha1
+                      compatibility commitment.
+                    items:
+                      description: IdentityProvider declares an external OIDC identity
+                        provider whose tokens HyperFleet accepts. The issuer is the
+                        list key. This field name and its semantics are a v1alpha1
+                        compatibility commitment.
+                      properties:
+                        identityClaim:
+                          default: sub
+                          description: identityClaim is the JWT claim that identifies
+                            the caller. Defaults to "sub" when omitted. This field
+                            name and its semantics are a v1alpha1 compatibility commitment.
+                          maxLength: 128
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9._-]+$
+                          type: string
+                        issuer:
+                          description: issuer is the OIDC issuer URL, matched against
+                            the token's `iss` claim. It must be a valid https URL
+                            with a host and without query, fragment or trailing slash.
+                            This field name and its semantics are a v1alpha1 compatibility
+                            commitment.
+                          maxLength: 2048
+                          minLength: 1
+                          type: string
+                          x-kubernetes-validations:
+                          - message: issuer must be a valid https URL with a host
+                            rule: isURL(self) && url(self).getScheme() == 'https'
+                              && url(self).getHostname() != ''
+                          - message: issuer must not contain a query or a fragment
+                            rule: '!self.contains(''?'') && !self.contains(''#'')'
+                          - message: issuer must not end with a trailing slash
+                            rule: '!self.endsWith(''/'')'
+                        tenantDimensions:
+                          additionalProperties:
+                            description: 'TenantDimensionSource defines the source
+                              of a tenant dimension value: a JWT claim or a fixed
+                              value. Exactly one of claim or value must be set. This
+                              field name and its semantics are a v1alpha1 compatibility
+                              commitment.'
+                            properties:
+                              claim:
+                                description: claim is the JWT claim to read this dimension
+                                  from. Mutually exclusive with value. This field
+                                  name and its semantics are a v1alpha1 compatibility
+                                  commitment.
+                                maxLength: 256
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9._-]+$
+                                type: string
+                              value:
+                                description: value is a fixed dimension value for
+                                  this provider. Mutually exclusive with claim. Use
+                                  for identity domains where claims are untrusted.
+                                  This field name and its semantics are a v1alpha1
+                                  compatibility commitment.
+                                maxLength: 255
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9._-]+$
+                                type: string
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exactly one of claim or value must be set
+                              rule: (has(self.claim) && size(self.claim) != 0 && (!has(self.value)
+                                || size(self.value) == 0)) || ((!has(self.claim) ||
+                                size(self.claim) == 0) && has(self.value) && size(self.value)
+                                != 0)
+                          description: tenantDimensions overrides the source of each
+                            tenant dimension for this provider. Unlisted dimensions
+                            use the bundle preset. This field name and its semantics
+                            are a v1alpha1 compatibility commitment.
+                          maxProperties: 8
+                          type: object
+                          x-kubernetes-validations:
+                          - message: dimension name must match ^[A-Za-z0-9._-]{1,63}$
+                            rule: self.all(x, x.matches('^[A-Za-z0-9._-]{1,63}$'))
+                      required:
+                      - issuer
+                      type: object
+                    maxItems: 64
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - issuer
+                    x-kubernetes-list-type: map
+                required:
+                - identityProviders
                 type: object
               bundle:
                 description: |-
@@ -211,6 +252,7 @@ spec:
                   rule: self == oldSelf
             required:
             - api
+            - authentication
             - bundle
             type: object
           status:

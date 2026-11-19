@@ -43,11 +43,7 @@ const (
 	testJWKCertURL = "https://issuer.example.com/certs"
 )
 
-// testCR returns a well-formed singleton in the shape Render consumes. Since
-// HYPERFLEET-1408, Render derives config.yaml, database env and JWKS wiring from
-// the spec, so the fixture carries a complete api spec (auth is enabled with
-// jwkCertSecretRef pinned so Render needs no controller-supplied discovery
-// result).
+// testCR returns a well-formed singleton in the shape Render consumes.
 func testCR() *hyperfleetv1alpha1.HyperFleetConfig {
 	return &hyperfleetv1alpha1.HyperFleetConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: hyperfleetv1alpha1.SingletonName},
@@ -57,12 +53,10 @@ func testCR() *hyperfleetv1alpha1.HyperFleetConfig {
 				Database: hyperfleetv1alpha1.DatabaseSpec{
 					SecretRef: hyperfleetv1alpha1.SecretReference{Name: testDBSecret},
 				},
-				Auth: hyperfleetv1alpha1.AuthSpec{
-					Enabled:          ptr.To(true),
-					Issuer:           testIssuer,
-					Audience:         testAudience,
-					JWKCertSecretRef: &hyperfleetv1alpha1.SecretReference{Name: testJWKSSecret},
-				},
+			},
+			Authentication: hyperfleetv1alpha1.AuthenticationSpec{
+				Audience:          testAudience,
+				IdentityProviders: []hyperfleetv1alpha1.IdentityProvider{{Issuer: testIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"tenancy_ocid": {Claim: "tenancy_ocid"}}}},
 			},
 		},
 	}
@@ -186,7 +180,7 @@ func TestRenderDeploymentDatabaseEnv(t *testing.T) {
 	dep := deploymentFrom(t, testCR())
 
 	// The database Secret is mounted read-only, unconditionally (unlike the
-	// optional TLS/JWKS mounts), so its keys surface as files.
+	// optional TLS mount), so its keys surface as files.
 	g.Expect(volumeSecretName(dep, dbVolume)).To(Equal(testDBSecret))
 	g.Expect(mountReadOnlyAt(dep, dbVolume)).To(Equal(dbMountPath))
 
@@ -215,13 +209,18 @@ func TestRenderDeploymentDatabaseEnv(t *testing.T) {
 func TestRenderDeploymentMigrationInitContainer(t *testing.T) {
 	g := NewWithT(t)
 
-	// Exercise every optional Secret mount so the test proves migration wiring
-	// cannot drift from the runtime container's complete configuration.
+	// Exercise every optional Secret mount (database, TLS, JWKS) so the test
+	// proves migration wiring cannot drift from the runtime container's
+	// complete configuration.
 	cr := testCR()
 	cr.Spec.API.TLS = &hyperfleetv1alpha1.TLSSpec{
 		SecretRef: hyperfleetv1alpha1.SecretReference{Name: testTLSSecret},
 	}
-	dep := deploymentFrom(t, cr)
+	comp := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, Audience: testAudience, JWKSSecretName: testJWKSSecret}})
+	objs, err := comp.Render(context.Background(), cr)
+	g.Expect(err).NotTo(HaveOccurred())
+	dep, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
+	g.Expect(ok).To(BeTrue())
 
 	spec := dep.Spec.Template.Spec
 	g.Expect(spec.InitContainers).To(HaveLen(1))
@@ -237,7 +236,7 @@ func TestRenderDeploymentMigrationInitContainer(t *testing.T) {
 
 	// The migration must use the exact same image and database/file wiring as
 	// serve. In particular, this keeps the runtime's DB Secret, config, /tmp,
-	// and optional TLS/JWKS mount behavior in lockstep.
+	// and optional TLS and JWKS mount behavior in lockstep.
 	g.Expect(migration.Image).To(Equal(runtime.Image))
 	g.Expect(migration.ImagePullPolicy).To(Equal(runtime.ImagePullPolicy))
 	g.Expect(migration.WorkingDir).To(Equal(runtime.WorkingDir))
@@ -267,54 +266,51 @@ func TestRenderTLSMountOnlyWhenConfigured(t *testing.T) {
 func TestRenderJWKSMountOnlyWhenSecretRef(t *testing.T) {
 	g := NewWithT(t)
 
-	// Secret-based auth (the fixture default): JWKS Secret mounted read-only.
 	dep := deploymentFrom(t, testCR())
-	g.Expect(volumeSecretName(dep, jwksVolume)).To(Equal(testJWKSSecret))
-	g.Expect(mountReadOnlyAt(dep, jwksVolume)).To(Equal(jwksMountPath))
+	g.Expect(volumeNames(dep)).NotTo(ContainElement(jwksVolume))
 
-	// No Secret pinned: falls through to the controller-supplied discovered URL,
-	// so no JWKS mount (config.yaml assertions are in
-	// TestRenderDiscoveredJWKSURLLandsInConfig).
-	cr := testCR()
-	cr.Spec.API.Auth.JWKCertSecretRef = nil
-	comp := New("img", testNamespace, Options{})
-	comp.ResolvedJWKSURL = "https://issuer.example.com/discovered"
-	objs, err := comp.Render(context.Background(), cr)
+	comp := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, Audience: testAudience, JWKSSecretName: testJWKSSecret}})
+	objs, err := comp.Render(context.Background(), testCR())
 	g.Expect(err).NotTo(HaveOccurred())
 	dep2, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
 	g.Expect(ok).To(BeTrue())
-	g.Expect(volumeNames(dep2)).NotTo(ContainElement(jwksVolume))
+	g.Expect(volumeSecretName(dep2, jwksVolume)).To(Equal(testJWKSSecret))
+	g.Expect(mountReadOnlyAt(dep2, jwksVolume)).To(Equal(jwksMountPath))
+
+	comp2 := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, Audience: testAudience, JWKCertURL: testJWKCertURL}})
+	objs, err = comp2.Render(context.Background(), testCR())
+	g.Expect(err).NotTo(HaveOccurred())
+	dep3, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(volumeNames(dep3)).NotTo(ContainElement(jwksVolume))
+	cm, ok := byKind(objs)["ConfigMap"].(*corev1.ConfigMap)
+	g.Expect(ok).To(BeTrue())
+	c0 := parseConfig(t, cm.Data[ConfigFileKey])["server"].(map[string]any)["jwt"].(map[string]any)["configs"].([]any)[0].(map[string]any)
+	g.Expect(c0["jwk_cert_url"]).To(Equal(testJWKCertURL))
+	g.Expect(c0).NotTo(HaveKey("jwk_cert_file"))
 }
 
-func TestRenderJWKSMountRequiresAuthEnabled(t *testing.T) {
+func TestRenderJWTMountUsesSecretWhenBothSourcesSet(t *testing.T) {
 	g := NewWithT(t)
 
-	// Auth disabled but a JWKS Secret is pinned (the fixture default). The API
-	// never reads the JWKS file when auth is off, so the Secret must NOT be
-	// mounted — otherwise an unused (and possibly absent, hence
-	// pod-start-blocking) Secret is injected. The mount gate must match
-	// resolveJWKSource/referencedSecretData, which both require auth to be
-	// enabled.
-	cr := testCR()
-	cr.Spec.API.Auth.Enabled = ptr.To(false)
-
-	dep := deploymentFrom(t, cr)
-	g.Expect(volumeNames(dep)).NotTo(ContainElement(jwksVolume))
+	comp := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, Audience: testAudience, JWKCertURL: testJWKCertURL, JWKSSecretName: testJWKSSecret}})
+	objs, err := comp.Render(context.Background(), testCR())
+	g.Expect(err).NotTo(HaveOccurred())
+	dep, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(volumeSecretName(dep, jwksVolume)).To(Equal(testJWKSSecret))
+	cm, ok := byKind(objs)["ConfigMap"].(*corev1.ConfigMap)
+	g.Expect(ok).To(BeTrue())
+	c0 := parseConfig(t, cm.Data[ConfigFileKey])["server"].(map[string]any)["jwt"].(map[string]any)["configs"].([]any)[0].(map[string]any)
+	g.Expect(c0["jwk_cert_file"]).To(Equal(jwksFilePath))
+	g.Expect(c0).NotTo(HaveKey("jwk_cert_url"))
 }
 
-func TestRenderDiscoveredJWKSURLLandsInConfig(t *testing.T) {
+func TestRenderNilJWTRendersDisabledWithNoMount(t *testing.T) {
 	g := NewWithT(t)
-
-	// Auth on with no pinned Secret: resolveJWKSource falls through to the
-	// controller-supplied OIDC-discovered URL (Component.ResolvedJWKSURL), which
-	// must be written into config.yaml as jwk_cert_url with no JWKS mount.
-	cr := testCR()
-	cr.Spec.API.Auth.JWKCertSecretRef = nil
-	const discovered = "https://issuer.example.com/discovered/keys"
 
 	comp := New("img", testNamespace, Options{})
-	comp.ResolvedJWKSURL = discovered
-	objs, err := comp.Render(context.Background(), cr)
+	objs, err := comp.Render(context.Background(), testCR())
 	g.Expect(err).NotTo(HaveOccurred())
 
 	dep, ok := byKind(objs)["Deployment"].(*appsv1.Deployment)
@@ -323,9 +319,46 @@ func TestRenderDiscoveredJWKSURLLandsInConfig(t *testing.T) {
 
 	cm, ok := byKind(objs)["ConfigMap"].(*corev1.ConfigMap)
 	g.Expect(ok).To(BeTrue())
+	cfg := parseConfig(t, cm.Data[ConfigFileKey])
+	jwt := cfg["server"].(map[string]any)["jwt"].(map[string]any)
+	g.Expect(jwt["enabled"]).To(BeFalse())
+	g.Expect(jwt).NotTo(HaveKey("configs"))
+}
+
+func TestRenderJWTAudienceFallback(t *testing.T) {
+	g := NewWithT(t)
+
+	cr := testCR()
+	cr.Spec.Authentication.Audience = "fallback-audience"
+	comp := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, JWKCertURL: testJWKCertURL}})
+	objs, err := comp.Render(context.Background(), cr)
+	g.Expect(err).NotTo(HaveOccurred())
+	cm, ok := byKind(objs)["ConfigMap"].(*corev1.ConfigMap)
+	g.Expect(ok).To(BeTrue())
 	c0 := parseConfig(t, cm.Data[ConfigFileKey])["server"].(map[string]any)["jwt"].(map[string]any)["configs"].([]any)[0].(map[string]any)
-	g.Expect(c0["jwk_cert_url"]).To(Equal(discovered))
-	g.Expect(c0).NotTo(HaveKey("jwk_cert_file"))
+	g.Expect(c0["audience"]).To(Equal("fallback-audience"))
+
+	comp2 := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, Audience: "explicit-audience", JWKCertURL: testJWKCertURL}})
+	objs, err = comp2.Render(context.Background(), cr)
+	g.Expect(err).NotTo(HaveOccurred())
+	cm, ok = byKind(objs)["ConfigMap"].(*corev1.ConfigMap)
+	g.Expect(ok).To(BeTrue())
+	c0 = parseConfig(t, cm.Data[ConfigFileKey])["server"].(map[string]any)["jwt"].(map[string]any)["configs"].([]any)[0].(map[string]any)
+	g.Expect(c0["audience"]).To(Equal("explicit-audience"))
+}
+
+func TestRenderJWTErrors(t *testing.T) {
+	g := NewWithT(t)
+
+	comp := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: "", JWKCertURL: testJWKCertURL}})
+	_, err := comp.Render(context.Background(), testCR())
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("issuer is empty"))
+
+	comp2 := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer}})
+	_, err = comp2.Render(context.Background(), testCR())
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("no JWKS source"))
 }
 
 func TestReferencedSecrets(t *testing.T) {
@@ -340,34 +373,30 @@ func TestReferencedSecrets(t *testing.T) {
 		return m
 	}
 
-	// Default fixture: auth enabled with JWKS Secret, no TLS.
 	roles := roleSet(comp.ReferencedSecrets(testCR()))
 	g.Expect(roles).To(HaveKey("database"))
-	g.Expect(roles).To(HaveKey("jwks"))
 	g.Expect(roles).NotTo(HaveKey("tls"))
+	g.Expect(roles).NotTo(HaveKey("jwks"))
 
-	// TLS configured: adds "tls" role.
 	crTLS := testCR()
 	crTLS.Spec.API.TLS = &hyperfleetv1alpha1.TLSSpec{
 		SecretRef: hyperfleetv1alpha1.SecretReference{Name: testTLSSecret},
 	}
 	roles = roleSet(comp.ReferencedSecrets(crTLS))
 	g.Expect(roles).To(HaveKey("database"))
-	g.Expect(roles).To(HaveKey("jwks"))
 	g.Expect(roles).To(HaveKey("tls"))
-
-	// Auth disabled: no JWKS secret even though JWKCertSecretRef is set.
-	crNoAuth := testCR()
-	crNoAuth.Spec.API.Auth.Enabled = ptr.To(false)
-	roles = roleSet(comp.ReferencedSecrets(crNoAuth))
-	g.Expect(roles).To(HaveKey("database"))
 	g.Expect(roles).NotTo(HaveKey("jwks"))
 
-	// Auth enabled but no pinned JWKS Secret: no JWKS secret (uses discovered URL).
-	crNoJWKSSecret := testCR()
-	crNoJWKSSecret.Spec.API.Auth.JWKCertSecretRef = nil
-	roles = roleSet(comp.ReferencedSecrets(crNoJWKSSecret))
+	compJWT := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, JWKSSecretName: testJWKSSecret}})
+	roles = roleSet(compJWT.ReferencedSecrets(testCR()))
 	g.Expect(roles).To(HaveKey("database"))
+	g.Expect(roles).To(HaveKey("jwks"))
+
+	compJWTURL := New("img", testNamespace, Options{JWT: &JWTOptions{IssuerURL: testIssuer, JWKCertURL: testJWKCertURL}})
+	roles = roleSet(compJWTURL.ReferencedSecrets(testCR()))
+	g.Expect(roles).NotTo(HaveKey("jwks"))
+
+	roles = roleSet(comp.ReferencedSecrets(testCR()))
 	g.Expect(roles).NotTo(HaveKey("jwks"))
 }
 

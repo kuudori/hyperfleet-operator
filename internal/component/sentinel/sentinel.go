@@ -26,7 +26,6 @@ import (
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
 	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
-	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/api"
 )
 
 // Options carries all construction inputs for a Sentinel component instance.
@@ -110,7 +109,6 @@ func (c *Component) Render(_ context.Context, cr *hyperfleetv1alpha1.HyperFleetC
 		HasParent:    c.ParentKind != "",
 		APIBaseURL:   c.APIBaseURL,
 		BrokerTopic:  brokerTopic(c.Namespace, c.ResourceType),
-		AuthEnabled:  api.AuthEnabled(cr),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("render sentinel config for %q: %w", c.ResourceType, err)

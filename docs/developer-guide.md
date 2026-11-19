@@ -73,7 +73,7 @@ devcontainer as a supported build environment for this branch.
 |---|---|
 | `api/v1alpha1` | `HyperFleetConfig` and `ManagementClusterRegistration` APIs, validation markers, defaults, status vocabulary, and generated deep-copy code. |
 | `cmd` | Manager startup, scheme registration, flags, related-image input, and controller wiring. |
-| `internal/controller` | Reconciliation, watches, Secret resolution, OIDC discovery, server-side apply orchestration, rollout hashing, status rollup, and metrics. |
+| `internal/controller` | Reconciliation, watches, Secret resolution, server-side apply orchestration, rollout hashing, status rollup, and metrics. |
 | `internal/bundle` | Resolves `spec.bundle` into an ordered set of components. |
 | `internal/component` | Component implementations. Each renders desired objects and derives health from the applied objects. |
 | `internal/apply` | Owner-reference handling and server-side apply. |
@@ -93,8 +93,7 @@ There is one controller for the singleton `HyperFleetConfig`; components do not
 get independent controllers. At a high level, one reconciliation:
 
 1. Reads `HyperFleetConfig/cluster` and establishes the operator namespace.
-2. Resolves referenced Secrets and, when needed, the issuer's OIDC discovery
-   document.
+2. Resolves referenced Secrets.
 3. Calls `bundle.Resolve` to obtain shared components followed by
    bundle-specific components.
 4. Calls each component's pure `Render` method.
@@ -220,4 +219,4 @@ minimum:
 | Controller tests cannot start envtest | Run `make test` with network access so `setup-envtest` can obtain the Kubernetes control-plane binaries matching the Go module's Kubernetes dependencies. |
 | An e2e run leaves a Kind cluster behind | Preserve the failure diagnostics, then run `make cleanup-test-e2e KIND_CLUSTER=<dedicated-cluster-name>`. Do not use a shared or valuable cluster name: the normal successful path deletes it too. |
 | Generated files change unexpectedly | Run `make manifests generate`, inspect the diff, and keep only changes caused by the API, RBAC, or controller markers you intentionally changed. |
-| `make run` cannot reconcile the sample | Confirm that `OPERATOR_NAMESPACE` exists and contains the referenced Secrets, then check that the database and, when authentication is enabled, the issuer are reachable from the manager and API workloads. |
+| `make run` cannot reconcile the sample | Confirm that `OPERATOR_NAMESPACE` exists and contains the referenced Secrets, then check that the database is reachable from the manager and API workloads. |

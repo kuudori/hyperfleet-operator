@@ -110,12 +110,10 @@ func TestRenderDefaultConfigIsValidYAML(t *testing.T) {
 func TestRenderConfigAPIClientAuth(t *testing.T) {
 	g := NewWithT(t)
 
-	// auth enabled and https api base url
 	out, err := renderConfig(configInput{
 		ResourceType: testClustersRt,
 		APIBaseURL:   testHttpsAPIBaseURL,
 		BrokerTopic:  testBrokerTopic,
-		AuthEnabled:  true,
 	})
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(out).To(ContainSubstring("auth:"))
@@ -124,20 +122,15 @@ func TestRenderConfigAPIClientAuth(t *testing.T) {
 	g.Expect(out).To(ContainSubstring("token_cache_ttl: 30s"))
 	g.Expect(out).To(ContainSubstring("base_url: " + testHttpsAPIBaseURL))
 
-	// auth disabled and http api base url
 	out, err = renderConfig(configInput{
 		ResourceType: testClustersRt,
 		APIBaseURL:   testHttpAPIBaseURL,
 		BrokerTopic:  testBrokerTopic,
-		AuthEnabled:  false,
 	})
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(out).To(ContainSubstring("base_url: " + testHttpAPIBaseURL))
-	g.Expect(out).NotTo(ContainSubstring("auth:"))
-	g.Expect(out).NotTo(ContainSubstring("token_path: /var/run/secrets/hyperfleet/api-token/token"))
-	g.Expect(out).NotTo(ContainSubstring("scheme: Bearer"))
-	g.Expect(out).NotTo(ContainSubstring("token_cache_ttl: 30s"))
-
+	g.Expect(out).To(ContainSubstring("auth:"))
+	g.Expect(out).To(ContainSubstring("token_path: /var/run/secrets/hyperfleet/api-token/token"))
 }
 
 // --- renderBrokerConfig tests ---

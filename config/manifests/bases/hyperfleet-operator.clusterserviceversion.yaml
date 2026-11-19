@@ -16,17 +16,25 @@ metadata:
           },
           "spec": {
             "api": {
-              "auth": {
-                "audience": "hyperfleet-api",
-                "enabled": true,
-                "issuer": "https://issuer.example.com"
-              },
               "database": {
                 "secretRef": {
                   "name": "hyperfleet-db"
                 }
               },
               "profile": "small"
+            },
+            "authentication": {
+              "audience": "hyperfleet-api",
+              "identityProviders": [
+                {
+                  "issuer": "https://idcs-example.identity.oraclecloud.com",
+                  "tenantDimensions": {
+                    "tenancy_ocid": {
+                      "claim": "tenancy_ocid"
+                    }
+                  }
+                }
+              ]
             },
             "bundle": "cloud-capi"
           }

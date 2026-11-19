@@ -68,11 +68,6 @@ type Config struct {
 	Namespace string
 	// BrokerInfo contains information about the Sentinel message broker backend.
 	BrokerInfo *sentinel.BrokerInfo
-	// ResolvedJWKSURL is the JWKS URL the controller derived via OIDC discovery.
-	// It is threaded through to the API component, which needs it only when auth
-	// is enabled and the CR pins neither a JWKS URL nor a JWKS Secret. Empty
-	// otherwise (the component reads the CR field/Secret path directly).
-	ResolvedJWKSURL string
 }
 
 // cloudCAPIEntities is the entity registration set for the cloud-capi bundle.
@@ -190,18 +185,6 @@ func Resolve(b hyperfleetv1alpha1.BundleType, cfg Config) ([]Component, error) {
 		return nil, fmt.Errorf("resolve bundle %q: %w", b, err)
 	}
 	return append(shared, bundleSpecific(b)...), nil
-}
-
-// SetResolvedJWKSURL sets the OIDC-discovered JWKS URL on just the API component.
-// The controller calls this after bundle resolution but before Render, since
-// OIDC discovery is a network read that cannot happen at resolve time.
-func SetResolvedJWKSURL(components []Component, url string) {
-	for _, c := range components {
-		if ac, ok := c.(*api.Component); ok {
-			ac.ResolvedJWKSURL = url
-			return
-		}
-	}
 }
 
 func SetAPIBaseURL(components []Component, url string) {

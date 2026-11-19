@@ -584,14 +584,6 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("creating the referenced JWKS Secret")
-			cmd = exec.Command("kubectl", "create", "secret", "generic", "hyperfleet-jwks",
-				"-n", namespace,
-				`--from-literal=jwks.json={"keys":[]}`,
-			)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
 			By("creating the cluster-scoped HyperFleetConfig")
 			cmd = exec.Command("kubectl", "apply", "-f", "test/e2e/hyperfleetconfig.yaml")
 			_, err = utils.Run(cmd)

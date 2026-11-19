@@ -66,8 +66,8 @@ const (
 	tlsKeyFilePath  = tlsMountPath + "/tls.key"
 	tlsVolume       = "tls"
 
-	// jwksMountPath is where the JWKS Secret is mounted when
-	// spec.api.auth.jwkCertSecretRef is set.
+	// jwksMountPath is where the JWKS Secret is mounted when a JWKS Secret
+	// source is configured.
 	jwksMountPath = configMountPath + "/jwks"
 	// jwksFilePath is the JWKS document as a file, fed to the API's
 	// jwk_cert_file. The API parses this as a JSON Web Key Set
@@ -99,7 +99,7 @@ const (
 	SecretKeyTLSCert = "tls.crt"
 	SecretKeyTLSKey  = "tls.key"
 
-	// JWKS key (spec.api.auth.jwkCertSecretRef); a JSON Web Key Set document.
+	// JWKS key (component-internal JWT Secret); a JSON Web Key Set document.
 	SecretKeyJWKS = "jwks.json"
 )
 
@@ -155,20 +155,17 @@ type EntityDescriptor struct {
 }
 
 // configInput carries everything renderConfig needs, already resolved by the
-// caller (Render). The JWKS source is pre-resolved to at most one of a URL or a
-// file path: precedence and OIDC discovery are decided upstream, so this function
-// stays a pure serializer.
+// caller (Render). JWKS source is pre-resolved to at most one of a URL or a
+// file path.
 type configInput struct {
-	// AuthEnabled toggles server.jwt.enabled and whether an issuer config is
-	// emitted at all.
-	AuthEnabled bool
-	// Issuer and Audience populate the single JWT issuer config when auth is on.
+	// JWTEnabled toggles server.jwt.enabled and whether an issuer config is
+	// emitted.
+	JWTEnabled bool
+	// Issuer and Audience populate the JWT issuer config when JWT is enabled.
 	Issuer   string
 	Audience string
 	// JWKCertURL / JWKCertFile are mutually exclusive; exactly one is non-empty
-	// when auth is enabled. JWKCertURL is always the OIDC-discovered jwks_uri
-	// (there is no partner-pinned URL); JWKCertFile is the in-pod path of a
-	// mounted JWKS Secret.
+	// when JWT is enabled.
 	JWKCertURL  string
 	JWKCertFile string
 	// TLSEnabled emits the server.tls block pointing at the mounted cert/key.
@@ -223,21 +220,13 @@ type jwtIssuerConfig struct {
 	JWKCertFile string `json:"jwk_cert_file,omitempty"`
 }
 
-// renderConfig serializes the operator-owned config subset to a deterministic
-// YAML document (header + marshaled struct). It is pure: no cluster or network
-// access, no time or randomness.
-//
-// It returns an error when auth is enabled but no JWKS source was resolved
-// (neither URL nor file). That state should be unreachable — the controller
-// resolves a URL (via the CR field or OIDC discovery) or a file (via the CR
-// Secret ref) before calling Render — so the error exists to fail loudly on a
-// wiring bug rather than emit a config the API would reject at startup.
+// renderConfig serializes the operator-owned config subset. It returns an error when JWT is enabled but no JWKS source is resolved or the issuer is empty.
 func renderConfig(in configInput) (string, error) {
 	cfg := apiConfig{
 		Server: serverConfig{
 			Host: bindAllHost,
 			Port: portHTTP,
-			JWT:  jwtConfig{Enabled: in.AuthEnabled},
+			JWT:  jwtConfig{Enabled: in.JWTEnabled},
 		},
 		Health:   endpointConfig{Host: bindAllHost, Port: portHealth},
 		Metrics:  endpointConfig{Host: bindAllHost, Port: portMetrics},
@@ -252,9 +241,12 @@ func renderConfig(in configInput) (string, error) {
 		}
 	}
 
-	if in.AuthEnabled {
+	if in.JWTEnabled {
+		if in.Issuer == "" {
+			return "", fmt.Errorf("jwt enabled but issuer is empty")
+		}
 		if in.JWKCertURL == "" && in.JWKCertFile == "" {
-			return "", fmt.Errorf("auth enabled but no JWKS source resolved (neither URL nor file)")
+			return "", fmt.Errorf("jwt enabled but no JWKS source resolved (neither URL nor file)")
 		}
 		cfg.Server.JWT.Configs = []jwtIssuerConfig{{
 			IssuerURL:   in.Issuer,

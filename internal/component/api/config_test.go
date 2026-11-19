@@ -38,12 +38,8 @@ func TestRenderConfigIsDeterministic(t *testing.T) {
 	g := NewWithT(t)
 
 	in := configInput{
-		AuthEnabled: true,
-		Issuer:      testIssuer,
-		Audience:    testAudience,
-		JWKCertURL:  testJWKCertURL,
-		TLSEnabled:  true,
-		Entities:    []EntityDescriptor{{Kind: "Cluster", Plural: "clusters"}},
+		TLSEnabled: true,
+		Entities:   []EntityDescriptor{{Kind: "Cluster", Plural: "clusters"}},
 	}
 
 	// Byte-for-byte stability across calls is what makes the content-hash rollout
@@ -61,12 +57,8 @@ func TestRenderConfigURLAndTLS(t *testing.T) {
 	g := NewWithT(t)
 
 	out, err := renderConfig(configInput{
-		AuthEnabled: true,
-		Issuer:      testIssuer,
-		Audience:    testAudience,
-		JWKCertURL:  testJWKCertURL,
-		TLSEnabled:  true,
-		Entities:    cloudCAPITestEntities(),
+		TLSEnabled: true,
+		Entities:   cloudCAPITestEntities(),
 	})
 	g.Expect(err).NotTo(HaveOccurred())
 
@@ -85,18 +77,8 @@ func TestRenderConfigURLAndTLS(t *testing.T) {
 	g.Expect(tls["key_file"]).To(Equal(tlsKeyFilePath))
 
 	jwt := server["jwt"].(map[string]any)
-	g.Expect(jwt["enabled"]).To(BeTrue())
-	configs := jwt["configs"].([]any)
-	g.Expect(configs).To(HaveLen(1))
-	c0 := configs[0].(map[string]any)
-	g.Expect(c0["issuer_url"]).To(Equal(testIssuer))
-	g.Expect(c0["audience"]).To(Equal(testAudience))
-	g.Expect(c0["jwk_cert_url"]).To(Equal(testJWKCertURL))
-	// The file path must not be present in the URL case, and the operator leaves
-	// header/identity_claim unset so the API applies its own defaults.
-	g.Expect(c0).NotTo(HaveKey("jwk_cert_file"))
-	g.Expect(c0).NotTo(HaveKey("header"))
-	g.Expect(c0).NotTo(HaveKey("identity_claim"))
+	g.Expect(jwt["enabled"]).To(BeFalse())
+	g.Expect(jwt).NotTo(HaveKey("configs"))
 
 	// Entities round-trip with the API's snake_case keys.
 	entities := cfg["entities"].([]any)
@@ -108,11 +90,52 @@ func TestRenderConfigURLAndTLS(t *testing.T) {
 	g.Expect(first["require_spec_schema"]).To(BeTrue())
 }
 
+func TestRenderConfigAuthDisabled(t *testing.T) {
+	g := NewWithT(t)
+
+	out, err := renderConfig(configInput{})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	cfg := parseConfig(t, out)
+	server := cfg["server"].(map[string]any)
+	jwt := server["jwt"].(map[string]any)
+	g.Expect(jwt["enabled"]).To(BeFalse())
+	g.Expect(jwt).NotTo(HaveKey("configs"))
+	g.Expect(server).NotTo(HaveKey("tls"))
+	g.Expect(cfg).NotTo(HaveKey("entities"))
+}
+
+func TestRenderConfigJWTEnabledWithURL(t *testing.T) {
+	g := NewWithT(t)
+
+	out, err := renderConfig(configInput{
+		JWTEnabled: true,
+		Issuer:     testIssuer,
+		Audience:   testAudience,
+		JWKCertURL: testJWKCertURL,
+		TLSEnabled: true,
+		Entities:   cloudCAPITestEntities(),
+	})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	cfg := parseConfig(t, out)
+	server := cfg["server"].(map[string]any)
+	jwt := server["jwt"].(map[string]any)
+	g.Expect(jwt["enabled"]).To(BeTrue())
+	configs := jwt["configs"].([]any)
+	g.Expect(configs).To(HaveLen(1))
+	c0 := configs[0].(map[string]any)
+	g.Expect(c0["issuer_url"]).To(Equal(testIssuer))
+	g.Expect(c0["audience"]).To(Equal(testAudience))
+	g.Expect(c0["jwk_cert_url"]).To(Equal(testJWKCertURL))
+	g.Expect(c0).NotTo(HaveKey("jwk_cert_file"))
+}
+
 func TestRenderConfigJWKSFile(t *testing.T) {
 	g := NewWithT(t)
 
 	out, err := renderConfig(configInput{
-		AuthEnabled: true,
+		JWTEnabled:  true,
 		Issuer:      testIssuer,
 		Audience:    testAudience,
 		JWKCertFile: jwksFilePath,
@@ -124,35 +147,28 @@ func TestRenderConfigJWKSFile(t *testing.T) {
 	g.Expect(c0).NotTo(HaveKey("jwk_cert_url"))
 }
 
-func TestRenderConfigAuthDisabled(t *testing.T) {
+func TestRenderConfigErrorsWhenJWTEnabledButNoJWKSource(t *testing.T) {
 	g := NewWithT(t)
 
-	out, err := renderConfig(configInput{AuthEnabled: false})
-	g.Expect(err).NotTo(HaveOccurred())
-
-	cfg := parseConfig(t, out)
-	server := cfg["server"].(map[string]any)
-	jwt := server["jwt"].(map[string]any)
-	g.Expect(jwt["enabled"]).To(BeFalse())
-	// No issuer configs and no TLS block when neither is requested.
-	g.Expect(jwt).NotTo(HaveKey("configs"))
-	g.Expect(server).NotTo(HaveKey("tls"))
-	// Empty entity set emits no entities key.
-	g.Expect(cfg).NotTo(HaveKey("entities"))
-}
-
-func TestRenderConfigErrorsWhenAuthOnButNoJWKSource(t *testing.T) {
-	g := NewWithT(t)
-
-	// Guards the controller-to-renderer contract: auth on with neither a URL nor a
-	// file is a wiring bug and must fail loudly rather than emit a broken config.
 	_, err := renderConfig(configInput{
-		AuthEnabled: true,
-		Issuer:      testIssuer,
-		Audience:    testAudience,
+		JWTEnabled: true,
+		Issuer:     testIssuer,
+		Audience:   testAudience,
 	})
 	g.Expect(err).To(HaveOccurred())
 	g.Expect(err.Error()).To(ContainSubstring("no JWKS source"))
+}
+
+func TestRenderConfigErrorsWhenIssuerEmpty(t *testing.T) {
+	g := NewWithT(t)
+
+	_, err := renderConfig(configInput{
+		JWTEnabled: true,
+		Issuer:     "",
+		JWKCertURL: testJWKCertURL,
+	})
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("issuer is empty"))
 }
 
 // cloudCAPITestEntities is a small representative entity set for config tests. It

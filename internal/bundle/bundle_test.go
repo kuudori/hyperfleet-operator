@@ -22,12 +22,14 @@ import (
 
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
 	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/api"
 	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component/sentinel"
 )
+
+const testAudience = "hyperfleet-api"
+const testIssuerURL = "https://issuer.example.com"
 
 var testConfig = Config{
 	APIImage:      "test-quay.io/api:test",
@@ -106,19 +108,6 @@ func TestResolveWiresSharedTierComponents(t *testing.T) {
 	}
 }
 
-func TestSetResolvedJWKSURL(t *testing.T) {
-	g := NewWithT(t)
-
-	comps, err := Resolve(hyperfleetv1alpha1.BundleCloudCAPI, testConfig)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	apiComp, ok := comps[0].(*api.Component)
-	g.Expect(ok).To(BeTrue())
-	g.Expect(apiComp.ResolvedJWKSURL).To(BeEmpty())
-	SetResolvedJWKSURL(comps, "https://issuer.example.com/.well-known/jwks.json")
-	g.Expect(apiComp.ResolvedJWKSURL).To(Equal("https://issuer.example.com/.well-known/jwks.json"))
-}
-
 func TestResolveOnPremAgentErrors(t *testing.T) {
 	g := NewWithT(t)
 
@@ -140,8 +129,7 @@ func TestResolveOnPremAgentErrors(t *testing.T) {
 func TestEveryComponentReportsConditions(t *testing.T) {
 	g := NewWithT(t)
 
-	// A renderable CR: auth with a pinned JWKS cert Secret so nothing needs
-	// controller-supplied OIDC discovery.
+	// A renderable CR with authentication.
 	cr := &hyperfleetv1alpha1.HyperFleetConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: hyperfleetv1alpha1.SingletonName},
 		Spec: hyperfleetv1alpha1.HyperFleetConfigSpec{
@@ -150,12 +138,10 @@ func TestEveryComponentReportsConditions(t *testing.T) {
 				Database: hyperfleetv1alpha1.DatabaseSpec{
 					SecretRef: hyperfleetv1alpha1.SecretReference{Name: "hyperfleet-db"},
 				},
-				Auth: hyperfleetv1alpha1.AuthSpec{
-					Enabled:          ptr.To(true),
-					Issuer:           "https://issuer.example.com",
-					Audience:         "hyperfleet-api",
-					JWKCertSecretRef: &hyperfleetv1alpha1.SecretReference{Name: "hyperfleet-jwks"},
-				},
+			},
+			Authentication: hyperfleetv1alpha1.AuthenticationSpec{
+				Audience:          testAudience,
+				IdentityProviders: []hyperfleetv1alpha1.IdentityProvider{{Issuer: testIssuerURL, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"tenancy_ocid": {Claim: "tenancy_ocid"}}}},
 			},
 		},
 	}

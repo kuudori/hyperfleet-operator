@@ -12,7 +12,7 @@ The generated CRD remains the admission-time source of truth.
 - [Specification](#specification)
   - [TLS port advertisement](#tls-port-advertisement)
   - [Referenced Secret contracts](#referenced-secret-contracts)
-  - [Authentication and JWKS selection](#authentication-and-jwks-selection)
+  - [Identity providers](#identity-providers)
   - [Current sizing limitation](#current-sizing-limitation)
 - [Status reference](#status-reference)
   - [Operator conditions versus API resource conditions](#operator-conditions-versus-api-resource-conditions)
@@ -46,14 +46,24 @@ spec:
     database:
       secretRef:
         name: hyperfleet-db
-    auth:
-      enabled: true
-      issuer: https://issuer.example.com
-      audience: hyperfleet-api
     tls:
       secretRef:
         name: hyperfleet-api-tls
     profile: small
+  authentication:
+    audience: hyperfleet-api
+    identityProviders:
+      - issuer: https://idcs-example.identity.oraclecloud.com
+        tenantDimensions:
+          tenancy_ocid:
+            claim: tenancy_ocid
+      - issuer: https://idcs-example-2.identity.oraclecloud.com
+        identityClaim: preferred_username
+        tenantDimensions:
+          tenancy_ocid:
+            value: ocid1.tenancy.oc1..aaaa
+          compartment_id:
+            claim: compartment_id
 ```
 
 All referenced Secrets belong in the operator's namespace, not in a namespace
@@ -69,16 +79,18 @@ configuration can change it.
 | `spec.api.database` | Yes | None | External PostgreSQL configuration; the operator does not provision a database. |
 | `spec.api.database.secretRef` | Yes | None | Name-only reference to the database Secret in the operator namespace. |
 | `spec.api.database.secretRef.name` | Yes | None | DNS-1123 subdomain, 1 to 253 characters. |
-| `spec.api.auth` | Yes | None | JWT authentication configuration. |
-| `spec.api.auth.enabled` | No | `true` | Boolean. When true, both issuer and audience are required. |
-| `spec.api.auth.issuer` | Conditional | None | Required when auth is enabled. Whenever present, it must be an HTTPS URL with a host and 1 to 2048 characters. |
-| `spec.api.auth.audience` | Conditional | None | Required and non-empty when auth is enabled; 1 to 253 characters when present. |
-| `spec.api.auth.jwkCertSecretRef` | No | None | Optional name-only reference to a Secret containing a JWKS document. |
-| `spec.api.auth.jwkCertSecretRef.name` | Conditional | None | Required when the reference is present; DNS-1123 subdomain, 1 to 253 characters. |
 | `spec.api.tls` | No | No `server.tls` block; API serves plain HTTP | Optional API-serving TLS configuration. See [TLS port advertisement](#tls-port-advertisement). |
 | `spec.api.tls.secretRef` | Conditional | None | Required when `tls` is present; name-only reference in the operator namespace. |
 | `spec.api.tls.secretRef.name` | Conditional | None | DNS-1123 subdomain, 1 to 253 characters. |
 | `spec.api.profile` | No | `small` | Mutable. Accepted values are `small`, `medium`, and `large`. See [current sizing limitation](#current-sizing-limitation). |
+| `spec.authentication` | Yes | None | Default audience and identity providers. No `enabled` switch. See [identity providers](#identity-providers). |
+| `spec.authentication.audience` | No | `hyperfleet-api` | Default audience, 1 to 253 chars when set. Defaults to `hyperfleet-api`. |
+| `spec.authentication.identityProviders` | Yes | None | Map-list keyed by `issuer`, 1 to 64 entries, duplicates rejected. |
+| `spec.authentication.identityProviders[].issuer` | Yes | None | HTTPS URL, host, no `?`/`#`/trailing `/`, 1 to 2048 chars. |
+| `spec.authentication.identityProviders[].identityClaim` | No | `sub` | Claim naming caller, `^[A-Za-z0-9._-]+$`, 1 to 128 chars. |
+| `spec.authentication.identityProviders[].tenantDimensions` | No | Preset defaults | Per-dimension source: exactly one of `claim` or `value`. Dimension name `^[A-Za-z0-9._-]{1,63}$`. |
+| `spec.authentication.identityProviders[].tenantDimensions[dim].claim` | Conditional | None | Claim name, `^[A-Za-z0-9._-]+$`, 1 to 256 chars. |
+| `spec.authentication.identityProviders[].tenantDimensions[dim].value` | Conditional | None | Fixed value, `^[A-Za-z0-9._-]+$`, 1 to 255 chars. |
 
 ### TLS port advertisement
 
@@ -110,7 +122,6 @@ already trust that CA.
 | Reference | Required Secret type | Required keys | Notes |
 |---|---|---|---|
 | `database.secretRef` | No type requirement | `db.host`, `db.port`, `db.name`, `db.user`, `db.password` | Always referenced by the rendered API Deployment. |
-| `auth.jwkCertSecretRef` | No type requirement | `jwks.json` | Used only when authentication is enabled and this reference is set. |
 | `tls.secretRef` | `kubernetes.io/tls` | `tls.crt`, `tls.key` | Used when `spec.api.tls` is present. |
 
 The schema validates reference names, but it cannot validate another object's
@@ -124,32 +135,23 @@ The operator rolls the API pods when a referenced Secret changes so they use
 current credential or certificate material, without copying Secret values into
 rendered configuration.
 
-### Authentication and JWKS selection
+### Identity providers
 
-Authentication defaults to enabled. When it is enabled:
+`spec.authentication` is required — there is no way to turn authentication
+off. It declares the default audience and the accepted identity providers:
 
-- Setting `jwkCertSecretRef` mounts `jwks.json` from that Secret.
-- Omitting `jwkCertSecretRef` makes the operator fetch
-  `{issuer}/.well-known/openid-configuration` and pass the returned `jwks_uri`
-  to the API component.
-- Discovery connections are limited to public destinations. The operator rejects
-  loopback, private, link-local, multicast, unspecified, CGNAT, and special-
-  purpose addresses that IANA does not mark **Globally Reachable: True**. The
-  checked-in table is a complete static snapshot of the
-  [IANA IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml)
-  and [IANA IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml)
-  registries, updated 2025-10-09. Records with `False`, `N/A`, or retired
-  reachability are denied; IANA's explicitly globally reachable, more-specific
-  exceptions remain allowed by longest-prefix match. For the globally reachable
-  `64:ff9b::/96` NAT64 prefix, the embedded IPv4 destination must also pass the
-  IPv4 policy, so translation cannot reach a blocked IPv4 address. This check is
-  applied to the resolved dial address, so DNS rebinding cannot bypass it. Use
-  `jwkCertSecretRef` for a private or air-gapped issuer.
-- A discovery failure that has no usable cached value degrades reconciliation.
+- `audience` is the token audience. It defaults to `hyperfleet-api` when
+  omitted. Today it controls the ServiceAccount token projected for the
+  operator-managed components that call the API.
+- `identityProviders` lists the accepted issuers (1-64, keyed by `issuer`).
+  For each tenant dimension, set exactly one of `claim` (JWT claim name) or
+  `value` (fixed string); dimensions an entry does not list fall back to the
+  bundle preset.
 
-When `enabled` is explicitly false, issuer and audience are not required and
-JWKS discovery is not needed. If issuer or audience are supplied anyway, their
-individual validation still applies.
+These fields are validated at admission but not enforced yet: the API itself
+runs without JWT validation, so listing an identity provider does not yet
+authenticate API requests. HYPERFLEET-1534 consumes this configuration and
+turns enforcement on.
 
 ### Current sizing limitation
 
@@ -219,7 +221,7 @@ as published vocabulary rather than free-form text.
 | `Progressing` | `True` | `RolloutInProgress` | An operand Deployment has not completed rollout of its current generation. |
 | `Progressing` | `False` | `RolloutComplete` | All observed operand Deployments are fully rolled out and stable. |
 | `Degraded` | `False` | `AsExpected` | No reconciliation failure was detected. |
-| `Degraded` | `True` | `ReferencedSecretMissing` | A database, TLS, or JWKS Secret reference does not resolve in the operator namespace. |
+| `Degraded` | `True` | `ReferencedSecretMissing` | A database or TLS Secret reference does not resolve in the operator namespace. |
 | `Degraded` | `True` | `ReconcileError` | Any other error prevented the latest reconcile from reaching or maintaining the desired state. |
 
 Each condition's `observedGeneration` is the CR generation against which that

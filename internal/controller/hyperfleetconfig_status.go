@@ -40,8 +40,8 @@ import (
 //
 // componentsCollected must be true only when every component's Conditions()
 // was actually gathered this reconcile (the render/apply/Conditions loop ran
-// to completion without error). When false — Reconcile aborted early, e.g. a
-// failed OIDC discovery or a failed apply before any component reported in —
+// to completion without error). When false — Reconcile aborted early, e.g.
+// a failed apply before any component reported in —
 // Available/Progressing and status.components are deliberately left untouched
 // rather than defaulted to a fabricated healthy value: with zero fresh data,
 // publishing "True" would contradict the Degraded=True this same reconcile is
@@ -198,10 +198,8 @@ func rollupCondition(condType string, componentConditions []metav1.Condition, de
 // cause of a downstream reconcile error (e.g. a mount failure). The
 // reconcile-error branch deliberately does NOT echo reconcileErr.Error() into
 // the Message: status.conditions is readable by any principal with get/list on
-// this cluster-scoped CRD, and wrapped errors on the JWKS-discovery path can
-// contain internal network details (see blockDiscoveryDial in
-// hyperfleetconfig_rollout.go, which names the disallowed resolved IP in its
-// error text). The caller logs the real error; only a safe, static summary is
+// this cluster-scoped CRD, and wrapped errors can contain internal network
+// details. The caller logs the real error; only a safe, static summary is
 // published here.
 func degradedCondition(missingSecrets []string, reconcileErr error) metav1.Condition {
 	switch {

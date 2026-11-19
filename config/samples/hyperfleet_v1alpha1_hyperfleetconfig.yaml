@@ -17,11 +17,21 @@ spec:
     database:
       secretRef:
         name: hyperfleet-db
-    # auth configures partner-facing JWT authentication intent. issuer and
-    # audience are required when enabled is true (the default).
-    auth:
-      enabled: true
-      issuer: https://issuer.example.com
-      audience: hyperfleet-api
     # profile is a sizing hint. One of: small (default), medium, large.
     profile: small
+  # authentication declares audience and identity providers. Required.
+  authentication:
+    audience: hyperfleet-api
+    identityProviders:
+      - issuer: https://idcs-example.identity.oraclecloud.com
+        # identityClaim and tenantDimensions are per-provider overrides.
+        tenantDimensions:
+          tenancy_ocid:
+            claim: tenancy_ocid
+      - issuer: https://idcs-example-2.identity.oraclecloud.com
+        identityClaim: preferred_username
+        tenantDimensions:
+          tenancy_ocid:
+            value: ocid1.tenancy.oc1..aaaa
+          compartment_id:
+            claim: compartment_id

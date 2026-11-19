@@ -108,7 +108,7 @@ failed, so error rate can be broken down by cause.
 |-------|-------------|----------------|
 | `component` | Component name (const) | `operator` |
 | `version` | Application version (const) | `v1.2.3` |
-| `reason` | Reconcile stage that failed | `get`, `discovery`, `secrets`, `bundle`, `render`, `apply` |
+| `reason` | Reconcile stage that failed | `get`, `secrets`, `bundle`, `render`, `apply` |
 
 **Example output:**
 
@@ -182,7 +182,7 @@ hyperfleet_operator_operand_rollouts_total{component="operator",version="v1.2.3"
 applied configuration: the `HyperFleetConfig` spec plus every component's
 config-rollout hash (rendered config content and referenced-Secret
 resourceVersions). Covering only the spec would miss a Secret rotation or a
-resolved value that never lands in the CR (e.g. OIDC JWKS discovery), either of
+resolved value that never lands in the CR (e.g. a referenced Secret rotation), either of
 which changes what is actually applied to an operand without changing the spec
 itself. Exactly **one** series exists at a time: the collector is reset before
 each set, so a change replaces the previous series rather than accumulating

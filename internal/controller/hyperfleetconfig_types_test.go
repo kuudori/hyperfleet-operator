@@ -26,7 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
 )
@@ -35,16 +34,13 @@ import (
 // string literal that recurs three or more times in a package, and a single
 // definition keeps the specs in sync.
 const (
+	testTenancyOCID  = "tenancy_ocid"
 	testDBSecretName = "hyperfleet-db"
 	testIssuerURL    = "https://issuer.example.com"
 	testAudience     = "hyperfleet-api"
-	// testJWKSSecretName pins the JWKS source in the shared fixture so the
-	// reconciler specs never perform live OIDC discovery (a network call). The
-	// Secret need not actually exist: Render only checks jwkCertSecretRef is set.
-	testJWKSSecretName = "hyperfleet-jwks"
 	// testInvalidSecretName fails SecretReference.Name's DNS-1123 Pattern marker,
 	// which is inlined independently at every field that embeds a
-	// SecretReference (database, tls, jwkCertSecretRef).
+	// SecretReference (database, tls).
 	testInvalidSecretName = "Invalid_Name"
 )
 
@@ -66,15 +62,20 @@ func validHyperFleetConfig() *hyperfleetv1alpha1.HyperFleetConfig {
 				Database: hyperfleetv1alpha1.DatabaseSpec{
 					SecretRef: hyperfleetv1alpha1.SecretReference{Name: testDBSecretName},
 				},
-				Auth: hyperfleetv1alpha1.AuthSpec{
-					Enabled:          ptr.To(true),
+			},
+			Authentication: hyperfleetv1alpha1.AuthenticationSpec{
+				Audience: testAudience,
+				IdentityProviders: []hyperfleetv1alpha1.IdentityProvider{{
 					Issuer:           testIssuerURL,
-					Audience:         testAudience,
-					JWKCertSecretRef: &hyperfleetv1alpha1.SecretReference{Name: testJWKSSecretName},
-				},
+					TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{testTenancyOCID: {Claim: testTenancyOCID}},
+				}},
 			},
 		},
 	}
+}
+
+func authWithProviders(providers ...hyperfleetv1alpha1.IdentityProvider) hyperfleetv1alpha1.AuthenticationSpec {
+	return hyperfleetv1alpha1.AuthenticationSpec{Audience: testAudience, IdentityProviders: providers}
 }
 
 var _ = Describe("HyperFleetConfig CRD validation", func() {
@@ -182,106 +183,293 @@ var _ = Describe("HyperFleetConfig CRD validation", func() {
 		})
 	})
 
-	Context("auth validation", func() {
-		It("rejects enabled auth without issuer and audience", func() {
+	Context("authentication validation", func() {
+		const providerIssuer = "https://idcs-example.identity.oraclecloud.com"
+		const secondIssuer = "https://idp.example.org/oauth2"
+
+		createWithProviders := func(providers ...hyperfleetv1alpha1.IdentityProvider) error {
 			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth = hyperfleetv1alpha1.AuthSpec{Enabled: ptr.To(true)}
-			err := k8sClient.Create(ctx, obj)
+			obj.Spec.Authentication = authWithProviders(providers...)
+			return k8sClient.Create(ctx, obj)
+		}
+
+		// expectInvalid asserts the create failed admission validation with an
+		// Invalid error, so an unrelated failure (timeout, conflict) cannot
+		// masquerade as a schema rejection. Each wantCause substring must appear
+		// in the reported status cause.
+		expectInvalid := func(err error, wantCause ...string) {
+			GinkgoHelper()
+			ExpectWithOffset(1, err).To(HaveOccurred())
+			ExpectWithOffset(1, errors.IsInvalid(err)).To(BeTrue(), "expected an Invalid admission error, got: %v", err)
+			for _, want := range wantCause {
+				ExpectWithOffset(1, err.Error()).To(ContainSubstring(want))
+			}
+		}
+
+		It("accepts several providers with distinct issuers", func() {
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{testTenancyOCID: {Claim: testTenancyOCID}}},
+				hyperfleetv1alpha1.IdentityProvider{Issuer: secondIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"org": {Claim: "org_id"}}},
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://third.example.net"},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("accepts an issuer with a path", func() {
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.org/realms/main"},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("accepts per-provider identityClaim", func() {
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, IdentityClaim: "preferred_username", TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{testTenancyOCID: {Value: "ocid1.tenancy.oc1..aaaa"}}},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("accepts claim and value tenant dimensions", func() { //nolint:goconst
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{
+					"tenancy_ocid":   {Claim: "tenancy_ocid"}, //nolint:goconst
+					"compartment_id": {Claim: "compartment_id"},
+				}},
+				hyperfleetv1alpha1.IdentityProvider{Issuer: secondIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{
+					testTenancyOCID: {Value: "ocid1.tenancy.oc1..bbbb"},
+				}},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("accepts exactly 64 providers", func() {
+			providers := make([]hyperfleetv1alpha1.IdentityProvider, 0, 64)
+			for i := range 64 {
+				providers = append(providers, hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.com/" + strings.Repeat("a", 4) + strings.Repeat("b", 4) + "/" + strings.Repeat("x", (i%8)+1) + strings.Repeat("y", i/8+1)})
+			}
+			Expect(createWithProviders(providers...)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("rejects a config with no authentication block", func() { //nolint:goconst
+			u := minimalUnstructured()
+			delete(u.Object["spec"].(map[string]any), "authentication")
+			err := k8sClient.Create(ctx, u)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("issuer and audience are required when auth is enabled"))
+			Expect(err.Error()).To(ContainSubstring("authentication"))
+		})
+
+		It("defaults audience to hyperfleet-api when omitted", func() {
+			u := minimalUnstructured()
+			delete(u.Object["spec"].(map[string]any)["authentication"].(map[string]any), "audience")
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+			got := &hyperfleetv1alpha1.HyperFleetConfig{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: hyperfleetv1alpha1.SingletonName}, got)).To(Succeed())
+			Expect(got.Spec.Authentication.Audience).To(Equal("hyperfleet-api"))
+		})
+
+		It("rejects an explicit empty audience", func() { //nolint:goconst
+			u := minimalUnstructured()
+			u.Object["spec"].(map[string]any)["authentication"].(map[string]any)["audience"] = ""
+			expectInvalid(k8sClient.Create(ctx, u), "should be at least 1 chars long")
+		})
+
+		It("rejects an audience longer than 253", func() {
+			obj := validHyperFleetConfig()
+			obj.Spec.Authentication.Audience = strings.Repeat("a", 254)
+			expectInvalid(k8sClient.Create(ctx, obj), "may not be more than 253 bytes")
+		})
+
+		It("accepts audience at max length 253", func() {
+			obj := validHyperFleetConfig()
+			obj.Spec.Authentication.Audience = strings.Repeat("a", 253)
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("accepts claim at max length 256", func() {
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"a": {Claim: strings.Repeat("a", 256)}}},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("accepts value at max length 255", func() {
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"b": {Value: strings.Repeat("b", 255)}}},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("accepts dimension name at max length 63", func() {
+			dim := strings.Repeat("a", 63)
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{dim: {Claim: "tenancy_ocid"}}},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
+		It("rejects dimension name longer than 63", func() {
+			dim := strings.Repeat("a", 64)
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{dim: {Claim: "tenancy_ocid"}}},
+			), "dimension name must match")
+		})
+
+		It("rejects more than 8 tenantDimensions", func() {
+			dims := make(map[string]hyperfleetv1alpha1.TenantDimensionSource, 9)
+			for i := range 9 {
+				dims["dim"+strings.Repeat("a", i)] = hyperfleetv1alpha1.TenantDimensionSource{Claim: "tenancy_ocid"}
+			}
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: dims},
+			), "must have at most 8 items")
+		})
+
+		It("defaults identityClaim to sub", func() {
+			obj := validHyperFleetConfig()
+			obj.Spec.Authentication.IdentityProviders[0].IdentityClaim = ""
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+			got := &hyperfleetv1alpha1.HyperFleetConfig{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: hyperfleetv1alpha1.SingletonName}, got)).To(Succeed())
+			Expect(got.Spec.Authentication.IdentityProviders[0].IdentityClaim).To(Equal("sub"))
+		})
+
+		It("rejects an authentication block with no identityProviders", func() {
+			u := minimalUnstructured()
+			delete(u.Object["spec"].(map[string]any)["authentication"].(map[string]any), "identityProviders")
+			expectInvalid(k8sClient.Create(ctx, u), "identityProviders", "Required value")
+		})
+
+		It("rejects an empty identityProviders list", func() {
+			obj := validHyperFleetConfig()
+			obj.Spec.Authentication.IdentityProviders = []hyperfleetv1alpha1.IdentityProvider{}
+			expectInvalid(k8sClient.Create(ctx, obj), "should have at least 1")
+		})
+
+		It("rejects more than 64 providers", func() {
+			providers := make([]hyperfleetv1alpha1.IdentityProvider, 0, 65)
+			for i := range 65 {
+				providers = append(providers, hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.com/p/" + strings.Repeat("a", 5) + "/" + strings.Repeat("x", (i%8)+1) + "/" + strings.Repeat("y", i/8+1)})
+			}
+			expectInvalid(createWithProviders(providers...), "must have at most 64 items")
+		})
+
+		It("rejects a duplicate issuer", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer},
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer},
+			), "Duplicate value")
 		})
 
 		It("rejects a non-https issuer", func() {
-			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth.Issuer = "http://issuer.example.com"
-			err := k8sClient.Create(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("issuer must be a valid https URL"))
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "http://idp.example.com"},
+			), "issuer must be a valid https URL with a host")
 		})
 
 		It("rejects a scheme-only issuer with no host", func() {
-			// "https://" satisfies a naive startsWith('https://') check but has no
-			// host; the URL-library rule must reject it.
-			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth.Issuer = "https://"
-			err := k8sClient.Create(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("issuer must be a valid https URL"))
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://"},
+			), "issuer must be a valid https URL with a host")
 		})
 
-		It("rejects a present but empty issuer", func() {
-			// An explicit empty issuer is "present" to CEL, so MinLength (not the
-			// https XValidation alone) must reject it. Only unstructured can carry an
-			// explicit empty scalar; the typed client omits it via omitempty.
+		It("rejects an empty issuer", func() {
 			u := minimalUnstructured()
-			auth := u.Object["spec"].(map[string]any)["api"].(map[string]any)["auth"].(map[string]any)
-			auth["issuer"] = ""
-			err := k8sClient.Create(ctx, u)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("should be at least 1 chars long"))
+			auth := u.Object["spec"].(map[string]any)["authentication"].(map[string]any)
+			ips := auth["identityProviders"].([]any)
+			ips[0].(map[string]any)["issuer"] = ""
+			expectInvalid(k8sClient.Create(ctx, u), "should be at least 1 chars long")
 		})
 
-		It("rejects an issuer longer than the 2048-character maximum", func() {
-			// A long-but-valid https URL isolates MaxLength: isURL, scheme and host
-			// all pass, so only the length bound can reject it.
+		It("rejects an issuer with a query", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.com/path?a=b"},
+			), "issuer must not contain a query or a fragment")
+		})
+
+		It("rejects an issuer with a fragment", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.com/path#frag"},
+			), "issuer must not contain a query or a fragment")
+		})
+
+		It("rejects an issuer with a trailing slash", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.com/"},
+			), "issuer must not end with a trailing slash")
+		})
+
+		It("rejects an issuer longer than 2048", func() {
 			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth.Issuer = testIssuerURL + "/" + strings.Repeat("a", 2048)
-			err := k8sClient.Create(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("may not be more than 2048 bytes"))
+			obj.Spec.Authentication.IdentityProviders[0].Issuer = testIssuerURL + "/" + strings.Repeat("a", 2048)
+			expectInvalid(k8sClient.Create(ctx, obj), "may not be more than 2048 bytes")
 		})
 
-		It("rejects an empty audience when auth is enabled", func() {
-			// An explicit empty string is "present" to CEL has(), so the object-level
-			// rule alone would let it through; MinLength must reject it. Only an
-			// unstructured object can carry an explicit empty scalar (the typed client
-			// omits it via omitempty).
-			u := minimalUnstructured()
-			u.Object["spec"].(map[string]any)["api"].(map[string]any)["auth"] =
-				map[string]any{
-					"enabled":  true,
-					"issuer":   testIssuerURL,
-					"audience": "",
-				}
-			err := k8sClient.Create(ctx, u)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("should be at least 1 chars long"))
+		It("rejects an invalid identityClaim", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, IdentityClaim: "bad claim!"},
+			))
 		})
 
-		It("rejects an audience longer than the 253-character maximum", func() {
+		It("rejects an identityClaim longer than 128", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, IdentityClaim: strings.Repeat("a", 129)},
+			))
+		})
+
+		It("rejects a dimension with both claim and value", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"tenancy_ocid": {Claim: "tenancy_ocid", Value: "ocid1.tenancy.oc1..aaaa"}}},
+			), "exactly one of claim or value must be set")
+		})
+
+		It("rejects a dimension with neither claim nor value", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"tenancy_ocid": {}}},
+			), "exactly one of claim or value must be set")
+		})
+
+		It("rejects an invalid dimension name", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"bad/name": {Claim: "tenancy_ocid"}}},
+			), "dimension name must match")
+		})
+
+		It("rejects an invalid claim pattern", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"tenancy_ocid": {Claim: "bad claim!"}}},
+			))
+		})
+
+		It("rejects an invalid value pattern", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{testTenancyOCID: {Value: "bad/value!"}}},
+			))
+		})
+
+		It("rejects a claim longer than 256", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{"tenancy_ocid": {Claim: strings.Repeat("a", 257)}}},
+			))
+		})
+
+		It("rejects a value longer than 255", func() {
+			expectInvalid(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: providerIssuer, TenantDimensions: map[string]hyperfleetv1alpha1.TenantDimensionSource{testTenancyOCID: {Value: strings.Repeat("a", 256)}}},
+			))
+		})
+
+		It("bumps generation when a provider is added", func() {
 			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth.Audience = strings.Repeat("a", 254)
-			err := k8sClient.Create(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("may not be more than 253 bytes"))
-		})
-
-		It("accepts disabled auth without issuer and audience", func() {
-			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth = hyperfleetv1alpha1.AuthSpec{Enabled: ptr.To(false)}
 			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
 			DeferCleanup(deleteSingletonAndWait, ctx)
-		})
-
-		It("accepts auth with no jwkCertSecretRef (discovery case)", func() {
-			// jwkCertSecretRef is optional: omitting it is valid at the schema level;
-			// the operator derives the URL via OIDC discovery at reconcile time. There
-			// is no CR field to pin a URL directly (see AuthSpec's doc comment).
-			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth.JWKCertSecretRef = nil
-			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
-			DeferCleanup(deleteSingletonAndWait, ctx)
-		})
-
-		It("rejects a JWKS secret name that is not a DNS-1123 subdomain", func() {
-			// SecretReference.Name's Pattern marker is inlined independently at every
-			// field (database, tls, and this one); jwkCertSecretRef was the only one
-			// with no dedicated spec. Mirrors the database and tls cases above.
-			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth.JWKCertSecretRef = &hyperfleetv1alpha1.SecretReference{Name: testInvalidSecretName}
-			err := k8sClient.Create(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("jwkCertSecretRef.name"))
+			gen0 := obj.Generation
+			obj.Spec.Authentication.IdentityProviders = append(obj.Spec.Authentication.IdentityProviders, hyperfleetv1alpha1.IdentityProvider{Issuer: secondIssuer})
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+			Expect(obj.Generation).To(BeNumerically(">", gen0))
 		})
 	})
 
@@ -390,52 +578,14 @@ var _ = Describe("HyperFleetConfig CRD validation", func() {
 			Expect(err.Error()).To(ContainSubstring("database"))
 		})
 
-		It("rejects an api with no auth", func() {
-			u := minimalUnstructured()
-			api := u.Object["spec"].(map[string]any)["api"].(map[string]any)
-			delete(api, "auth")
-			err := k8sClient.Create(ctx, u)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("auth"))
-		})
 	})
 
-	Context("defaulting", func() {
-		// Server-side defaults only apply to fields genuinely absent from the
-		// submitted object. An unstructured object is used to omit them entirely.
-		It("populates profile and auth.enabled defaults on a minimal object", func() {
-			u := minimalUnstructured()
-			Expect(k8sClient.Create(ctx, u)).To(Succeed())
-			DeferCleanup(deleteSingletonAndWait, ctx)
-
-			got := &hyperfleetv1alpha1.HyperFleetConfig{}
-			Expect(k8sClient.Get(ctx,
-				types.NamespacedName{Name: hyperfleetv1alpha1.SingletonName}, got)).To(Succeed())
-			Expect(got.Spec.API.Profile).To(Equal(hyperfleetv1alpha1.SizingProfileSmall))
-			Expect(got.Spec.API.Auth.Enabled).To(HaveValue(BeTrue()))
-		})
-
-		It("defaults auth.enabled to true on the typed-client path when omitted", func() {
-			// Regression guard: with a non-pointer bool the typed client serializes
-			// enabled:false when the field is left zero, silently defeating the
-			// default=true. A *bool with omitempty must round-trip to true here.
-			obj := validHyperFleetConfig()
-			obj.Spec.API.Auth.Enabled = nil
-			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
-			DeferCleanup(deleteSingletonAndWait, ctx)
-
-			got := &hyperfleetv1alpha1.HyperFleetConfig{}
-			Expect(k8sClient.Get(ctx,
-				types.NamespacedName{Name: hyperfleetv1alpha1.SingletonName}, got)).To(Succeed())
-			Expect(got.Spec.API.Auth.Enabled).To(HaveValue(BeTrue()))
-		})
-	})
 })
 
 // minimalUnstructured builds the smallest valid HyperFleetConfig as an
 // unstructured object, omitting every field that carries a server-side default
-// (auth.enabled, api.profile) so those defaults are exercised.
-func minimalUnstructured() *unstructured.Unstructured {
+// (api.profile) so those defaults are exercised.
+func minimalUnstructured() *unstructured.Unstructured { //nolint:goconst
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(hyperfleetv1alpha1.GroupVersion.WithKind("HyperFleetConfig"))
 	u.SetName(hyperfleetv1alpha1.SingletonName)
@@ -445,12 +595,11 @@ func minimalUnstructured() *unstructured.Unstructured {
 			"database": map[string]any{
 				"secretRef": map[string]any{"name": testDBSecretName},
 			},
-			"auth": map[string]any{
-				// enabled omitted -> defaults to true
-				"issuer":   testIssuerURL,
-				"audience": testAudience,
-			},
 			// profile omitted -> defaults to "small"
+		},
+		"authentication": map[string]any{
+			"audience":          testAudience,
+			"identityProviders": []any{map[string]any{"issuer": testIssuerURL, "tenantDimensions": map[string]any{"tenancy_ocid": map[string]any{"claim": "tenancy_ocid"}}}},
 		},
 	}
 	return u

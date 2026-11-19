@@ -46,7 +46,6 @@ type configInput struct {
 	APIBaseURL   string
 	BrokerTopic  string
 	HasParent    bool
-	AuthEnabled  bool
 }
 
 // sentinelConfig and its nested types are the operator-owned subset of
@@ -148,14 +147,11 @@ func renderConfig(in configInput) (string, error) {
 		BaseURL: in.APIBaseURL,
 		Version: apiClientVersion,
 		Timeout: apiClientTimeout,
-	}
-	// If auth is enabled, append the auth values into the config
-	if in.AuthEnabled {
-		APIClientConfig.Auth = &authConfig{
-			TokenPath:     fmt.Sprintf("%s/%s", ServiceAccountTokenPath, ServiceAccountTokenFileName),
+		Auth: &authConfig{
+			TokenPath:     ServiceAccountTokenPath + "/" + ServiceAccountTokenFileName,
 			Scheme:        "Bearer",
 			TokenCacheTTL: "30s",
-		}
+		},
 	}
 
 	msgDecision, err := constructMessageDecision(in.ResourceType)

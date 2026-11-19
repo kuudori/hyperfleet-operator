@@ -54,4 +54,5 @@ const (
 	// Full path is /var/run/secrets/hyperfleet/api-token/token
 	ServiceAccountTokenFileName = "token"
 	ServiceAccountTokenPath     = "/var/run/secrets/hyperfleet/api-token"
+	apiTokenVolume              = "hyperfleet-api-token"
 )

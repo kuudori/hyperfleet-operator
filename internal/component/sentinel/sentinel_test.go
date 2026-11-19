@@ -355,6 +355,72 @@ func TestRenderServiceAccount(t *testing.T) {
 	g.Expect(sa.Namespace).To(Equal(testNamespace))
 }
 
+func TestRenderDeploymentHasAuthTokenVolume(t *testing.T) {
+	g := NewWithT(t)
+
+	objs, err := New(testOptions(BrokerTypeRabbitMQ)).Render(context.Background(), testCR())
+	g.Expect(err).NotTo(HaveOccurred())
+
+	dep := findDeployment(objs, ResourceName(testClustersRt))
+	g.Expect(dep).NotTo(BeNil())
+
+	var tokVol *corev1.Volume
+	for i := range dep.Spec.Template.Spec.Volumes {
+		if dep.Spec.Template.Spec.Volumes[i].Name == apiTokenVolume {
+			tokVol = &dep.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	g.Expect(tokVol).NotTo(BeNil())
+	g.Expect(tokVol.Projected).NotTo(BeNil())
+	g.Expect(tokVol.Projected.DefaultMode).To(HaveValue(BeEquivalentTo(int32(0444))))
+	g.Expect(tokVol.Projected.Sources).To(HaveLen(1))
+	g.Expect(tokVol.Projected.Sources[0].ServiceAccountToken).NotTo(BeNil())
+	g.Expect(tokVol.Projected.Sources[0].ServiceAccountToken.Audience).To(Equal("hyperfleet-api"))
+	g.Expect(tokVol.Projected.Sources[0].ServiceAccountToken.Path).To(Equal(ServiceAccountTokenFileName))
+	g.Expect(tokVol.Projected.Sources[0].ServiceAccountToken.ExpirationSeconds).To(HaveValue(BeEquivalentTo(int64(3600))))
+
+	var tokMount *corev1.VolumeMount
+	for i := range dep.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if dep.Spec.Template.Spec.Containers[0].VolumeMounts[i].Name == apiTokenVolume {
+			tokMount = &dep.Spec.Template.Spec.Containers[0].VolumeMounts[i]
+			break
+		}
+	}
+	g.Expect(tokMount).NotTo(BeNil())
+	g.Expect(tokMount.MountPath).To(Equal(ServiceAccountTokenPath))
+	g.Expect(tokMount.ReadOnly).To(BeTrue())
+}
+
+func TestRenderDeploymentTokenAudience(t *testing.T) {
+	g := NewWithT(t)
+
+	cr := testCR()
+	cr.Spec.Authentication = hyperfleetv1alpha1.AuthenticationSpec{
+		Audience:          "custom-audience",
+		IdentityProviders: []hyperfleetv1alpha1.IdentityProvider{{Issuer: "https://issuer.example.com"}},
+	}
+	objs, err := New(testOptions(BrokerTypeRabbitMQ)).Render(context.Background(), cr)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	dep := findDeployment(objs, ResourceName(testClustersRt))
+	// Select the token volume by name: taking the last projected
+	// ServiceAccountToken anywhere in the pod would let an unrelated volume
+	// satisfy the assertion.
+	var tokVol *corev1.Volume
+	for i := range dep.Spec.Template.Spec.Volumes {
+		if dep.Spec.Template.Spec.Volumes[i].Name == apiTokenVolume {
+			tokVol = &dep.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	g.Expect(tokVol).NotTo(BeNil())
+	g.Expect(tokVol.Projected).NotTo(BeNil())
+	g.Expect(tokVol.Projected.Sources).To(HaveLen(1))
+	g.Expect(tokVol.Projected.Sources[0].ServiceAccountToken).NotTo(BeNil())
+	g.Expect(tokVol.Projected.Sources[0].ServiceAccountToken.Audience).To(Equal("custom-audience"))
+}
+
 // --- Conditions ---
 
 func deploymentWithStatus(resourceType string, specReplicas, statusReplicas, availableReplicas, updatedReplicas int32, generation int64) *appsv1.Deployment {

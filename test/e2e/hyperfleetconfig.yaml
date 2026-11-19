@@ -8,9 +8,10 @@ spec:
     database:
       secretRef:
         name: hyperfleet-db
-    auth:
-      enabled: true
-      issuer: https://issuer.example.com
-      audience: hyperfleet-api
-      jwkCertSecretRef:
-        name: hyperfleet-jwks
+  authentication:
+    audience: hyperfleet-api
+    identityProviders:
+      - issuer: https://idcs-example.identity.oraclecloud.com
+        tenantDimensions:
+          tenancy_ocid:
+            claim: tenancy_ocid

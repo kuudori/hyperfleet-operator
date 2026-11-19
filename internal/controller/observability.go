@@ -44,8 +44,8 @@ const templateHashAnnotation = "hyperfleet.redhat.com/template-hash"
 // hashConfig returns a short, stable digest of the fully-applied state: the CR
 // spec plus every rendered component's config-rollout digest (see
 // computeConfigHash, returned by stampConfigHash). Spec alone is not enough — a
-// referenced Secret rotation, or a resolved value that never lands in the CR
-// (e.g. resolveJWKSURL's OIDC discovery), can change what is actually applied to
+// referenced Secret rotation or a resolved value that never lands in the CR
+// can change what is actually applied to
 // an operand without the spec itself changing, and this metric must reflect
 // that too. json.Marshal of a Go struct is field-ordered and deterministic, so
 // equal inputs hash equally across reconciles and process restarts.
