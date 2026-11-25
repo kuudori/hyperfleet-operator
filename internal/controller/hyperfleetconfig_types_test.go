@@ -364,6 +364,14 @@ var _ = Describe("HyperFleetConfig CRD validation", func() {
 			), "Duplicate value")
 		})
 
+		It("accepts issuers that differ only by path case", func() {
+			Expect(createWithProviders(
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.org/realms/Prod"},
+				hyperfleetv1alpha1.IdentityProvider{Issuer: "https://idp.example.org/realms/prod"},
+			)).To(Succeed())
+			DeferCleanup(deleteSingletonAndWait, ctx)
+		})
+
 		It("rejects a non-https issuer", func() {
 			expectInvalid(createWithProviders(
 				hyperfleetv1alpha1.IdentityProvider{Issuer: "http://idp.example.com"},

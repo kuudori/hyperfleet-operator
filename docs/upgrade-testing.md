@@ -234,7 +234,7 @@ make test-e2e-upgrade \
   ARTIFACT_DIR="$RUN_ARTIFACT_DIR"
 ```
 
-Make defaults to `GOTOOLCHAIN=go1.26.0`, matching `go.mod` and the pinned tools.
+Make defaults to `GOTOOLCHAIN=go1.26.7`, matching `go.mod`.
 An explicit environment or Make command-line value overrides that default.
 `OLM_CATALOG_IMAGE` selects the catalog containing both releases. `OLM_CHANNEL`
 selects the channel containing the direct N−1 → N upgrade edge. The catalog
@@ -350,13 +350,13 @@ modify the real release pipelines.
 
 The suite uses the official `github.com/operator-framework/api` OLM types for
 CSV decoding, InstallPlan validation, and resource construction. Version
-`v0.42.0` supports the repository's Go 1.26.0 toolchain; releases v0.43.0 through
-v0.46.0 require Go 1.26.3. The dynamic client still performs cluster requests,
+`v0.42.0` is the pinned version; releases v0.43.0 through
+v0.46.0 require Go 1.26.3 or newer. The dynamic client still performs cluster requests,
 including the UID/resource-version-checked approval patch and cleanup deletes.
 
 ```sh
-GOTOOLCHAIN=go1.26.0 go test -race ./test/e2e/upgrade
-GOTOOLCHAIN=go1.26.0 go test -tags=upgrade_e2e ./test/e2e/upgrade -run '^$'
+GOTOOLCHAIN=go1.26.7 go test -race ./test/e2e/upgrade
+GOTOOLCHAIN=go1.26.7 go test -tags=upgrade_e2e ./test/e2e/upgrade -run '^$'
 make lint-config lint test build
 git diff --check
 ```

@@ -49,6 +49,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
 )
 
 const (
@@ -65,11 +66,6 @@ const (
 	// ComponentName is both the component's Name() and its
 	// app.kubernetes.io/component label value.
 	ComponentName = "api"
-
-	// managedByOperator marks operands as operator-managed (the chart uses Helm
-	// here; we do not go through Helm).
-	managedByOperator = "hyperfleet-operator"
-	partOfHyperfleet  = "hyperfleet"
 
 	// Container/Service port names and numbers, matching the chart defaults.
 	portNameHTTP    = "http"
@@ -92,16 +88,6 @@ const (
 	migrationContainerName = "db-migrate"
 )
 
-// Label keys are declared once to keep them in sync between the common and
-// selector label sets.
-const (
-	labelName      = "app.kubernetes.io/name"
-	labelInstance  = "app.kubernetes.io/instance"
-	labelComponent = "app.kubernetes.io/component"
-	labelPartOf    = "app.kubernetes.io/part-of"
-	labelManagedBy = "app.kubernetes.io/managed-by"
-)
-
 // apiScheme is the scheme the API listener serves: "https" when the CR enables
 // TLS, "http" otherwise. It is also the API container/Service port name, so the
 // URL and the port name can't disagree.
@@ -121,30 +107,10 @@ func apiAppProtocol(cr *hyperfleetv1alpha1.HyperFleetConfig) *string {
 	return nil
 }
 
-// labels returns the common label set stamped on every operand's metadata. Only
-// the instance name varies per CR; every other value is a package constant, so
-// the helper takes just the name rather than the whole CR.
-func labels(name string) map[string]string {
-	return map[string]string{
-		labelName:      ResourceName,
-		labelInstance:  name,
-		labelComponent: ComponentName,
-		labelPartOf:    partOfHyperfleet,
-		labelManagedBy: managedByOperator,
-	}
-}
-
-// selectorLabels returns the immutable subset used for the Deployment selector,
-// the pod template labels and the Service selector. It must stay stable: a
-// Deployment's selector cannot be changed after creation. Every value here is
-// immutable (ResourceName and ComponentName are constants; the CR name is pinned
-// to the singleton "cluster").
-func selectorLabels(name string) map[string]string {
-	return map[string]string{
-		labelName:      ResourceName,
-		labelInstance:  name,
-		labelComponent: ComponentName,
-	}
+// Every selector value is a constant or the singleton CR name, so the selector
+// subset stays stable.
+func identity(crName string) component.Identity {
+	return component.Identity{Name: ResourceName, Component: ComponentName, Instance: crName}
 }
 
 // apiContainerResources returns a distinct value for each container while
@@ -259,15 +225,11 @@ func (c *Component) deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, n
 	}
 
 	return &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName,
-			Namespace: namespace,
-			Labels:    labels(cr.Name),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+		ObjectMeta: identity(cr.Name).ObjectMeta(ResourceName, namespace),
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To[int32](1),
-			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels(cr.Name)},
+			Selector: &metav1.LabelSelector{MatchLabels: identity(cr.Name).SelectorLabels()},
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -278,8 +240,8 @@ func (c *Component) deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, n
 			Template: corev1.PodTemplateSpec{
 				// Pods carry the full recommended label set; the Deployment selector
 				// (above) is the immutable subset of these, which stays valid because
-				// selectorLabels ⊆ labels.
-				ObjectMeta: metav1.ObjectMeta{Labels: labels(cr.Name)},
+				// SelectorLabels ⊆ Labels.
+				ObjectMeta: metav1.ObjectMeta{Labels: identity(cr.Name).Labels()},
 				Spec: corev1.PodSpec{
 					// The API never calls the Kubernetes API (its Role is empty),
 					// so it needs no service-account token. Opting out of the
@@ -354,15 +316,11 @@ func (c *Component) deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, n
 func service(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *corev1.Service {
 	apiPort := apiScheme(cr)
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName,
-			Namespace: namespace,
-			Labels:    labels(cr.Name),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		ObjectMeta: identity(cr.Name).ObjectMeta(ResourceName, namespace),
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeClusterIP,
-			Selector: selectorLabels(cr.Name),
+			Selector: identity(cr.Name).SelectorLabels(),
 			Ports: []corev1.ServicePort{
 				{Name: apiPort, Port: portHTTP, TargetPort: intstr.FromString(apiPort), Protocol: corev1.ProtocolTCP, AppProtocol: apiAppProtocol(cr)},
 				{Name: portNameHealth, Port: portHealth, TargetPort: intstr.FromString(portNameHealth), Protocol: corev1.ProtocolTCP},
@@ -375,12 +333,8 @@ func service(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *corev1.
 // serviceAccount builds the API's identity.
 func serviceAccount(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName,
-			Namespace: namespace,
-			Labels:    labels(cr.Name),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
+		ObjectMeta: identity(cr.Name).ObjectMeta(ResourceName, namespace),
 	}
 }
 
@@ -389,13 +343,9 @@ func serviceAccount(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *
 // this builder stays a pure object constructor.
 func configMap(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace, configYAML string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ConfigMapName,
-			Namespace: namespace,
-			Labels:    labels(cr.Name),
-		},
-		Data: map[string]string{ConfigFileKey: configYAML},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: identity(cr.Name).ObjectMeta(ConfigMapName, namespace),
+		Data:       map[string]string{ConfigFileKey: configYAML},
 	}
 }
 
@@ -406,13 +356,9 @@ func configMap(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace, configYAML st
 // rules.
 func role(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *rbacv1.Role {
 	return &rbacv1.Role{
-		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName,
-			Namespace: namespace,
-			Labels:    labels(cr.Name),
-		},
-		Rules: []rbacv1.PolicyRule{},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
+		ObjectMeta: identity(cr.Name).ObjectMeta(ResourceName, namespace),
+		Rules:      []rbacv1.PolicyRule{},
 	}
 }
 
@@ -425,12 +371,8 @@ func role(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *rbacv1.Rol
 // not enforce RBAC, so such a regression would not surface in the suite.
 func roleBinding(cr *hyperfleetv1alpha1.HyperFleetConfig, namespace string) *rbacv1.RoleBinding {
 	return &rbacv1.RoleBinding{
-		TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName,
-			Namespace: namespace,
-			Labels:    labels(cr.Name),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
+		ObjectMeta: identity(cr.Name).ObjectMeta(ResourceName, namespace),
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "Role",

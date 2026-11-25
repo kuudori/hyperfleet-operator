@@ -10,7 +10,7 @@ VERSION ?= 0.0.1
 OPERATOR_SDK_VERSION ?= v1.42.3
 
 # Match go.mod and the pinned tools. Environment and command-line overrides win.
-export GOTOOLCHAIN ?= go1.26.0
+export GOTOOLCHAIN ?= go1.26.7
 
 # The Go command used by every recipe.
 GO ?= go

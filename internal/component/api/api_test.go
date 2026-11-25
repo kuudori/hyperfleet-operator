@@ -92,8 +92,8 @@ func TestRenderProducesTheOperandSet(t *testing.T) {
 	// (including the component marker) and a non-empty GVK for SSA.
 	for _, o := range objs {
 		g.Expect(o.GetNamespace()).To(Equal(testNamespace))
-		g.Expect(o.GetLabels()).To(HaveKeyWithValue(labelComponent, ComponentName))
-		g.Expect(o.GetLabels()).To(HaveKeyWithValue(labelManagedBy, managedByOperator))
+		g.Expect(o.GetLabels()).To(HaveKeyWithValue(component.LabelComponent, ComponentName))
+		g.Expect(o.GetLabels()).To(HaveKeyWithValue(component.LabelManagedBy, component.ManagedBy))
 		g.Expect(o.GetObjectKind().GroupVersionKind().Kind).NotTo(BeEmpty())
 		g.Expect(o.GetObjectKind().GroupVersionKind().Version).NotTo(BeEmpty())
 	}
@@ -118,7 +118,7 @@ func TestRenderDeployment(t *testing.T) {
 	for k, v := range spec.Selector.MatchLabels {
 		g.Expect(spec.Template.Labels).To(HaveKeyWithValue(k, v))
 	}
-	g.Expect(spec.Template.Labels).To(HaveKeyWithValue(labelComponent, ComponentName))
+	g.Expect(spec.Template.Labels).To(HaveKeyWithValue(component.LabelComponent, ComponentName))
 
 	g.Expect(spec.Template.Spec.ServiceAccountName).To(Equal(ResourceName))
 	// The API does not use the Kubernetes API, so the SA token is not mounted.
@@ -636,7 +636,7 @@ func TestRenderService(t *testing.T) {
 	g.Expect(ok).To(BeTrue())
 	g.Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeClusterIP))
 	g.Expect(svc.Spec.Ports).To(HaveLen(3))
-	g.Expect(svc.Spec.Selector).To(HaveKeyWithValue(labelComponent, ComponentName))
+	g.Expect(svc.Spec.Selector).To(HaveKeyWithValue(component.LabelComponent, ComponentName))
 }
 
 // renderDeploymentAndService renders the CR and returns the Deployment and

@@ -58,7 +58,7 @@ Why the gate: the team rule is that a component nudges the bundle only if the op
 ## Developer Installation
 
 ### Prerequisites
-- go version v1.26.0+
+- go version v1.26.7+
 - docker version 18.06+
 - operator-sdk v1.42.3+
 - kubectl version v1.11.3+.

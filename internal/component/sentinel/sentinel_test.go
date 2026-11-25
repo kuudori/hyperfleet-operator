@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
 )
 
 const (
@@ -168,8 +169,8 @@ func TestRenderProducesTheOperandSet(t *testing.T) {
 
 	for _, o := range objs {
 		g.Expect(o.GetNamespace()).To(Equal(testNamespace))
-		g.Expect(o.GetLabels()).To(HaveKeyWithValue(labelComponent, componentName(testClustersRt)))
-		g.Expect(o.GetLabels()).To(HaveKeyWithValue(labelManagedBy, managedByOperator))
+		g.Expect(o.GetLabels()).To(HaveKeyWithValue(component.LabelComponent, componentName(testClustersRt)))
+		g.Expect(o.GetLabels()).To(HaveKeyWithValue(component.LabelManagedBy, component.ManagedBy))
 		g.Expect(o.GetObjectKind().GroupVersionKind().Kind).NotTo(BeEmpty())
 		g.Expect(o.GetObjectKind().GroupVersionKind().Version).NotTo(BeEmpty())
 	}

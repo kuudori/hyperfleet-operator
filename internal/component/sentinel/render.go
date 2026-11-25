@@ -35,12 +35,10 @@ import (
 	"k8s.io/utils/ptr"
 
 	hyperfleetv1alpha1 "github.com/openshift-hyperfleet/hyperfleet-operator/api/v1alpha1"
+	"github.com/openshift-hyperfleet/hyperfleet-operator/internal/component"
 )
 
 const (
-	managedByOperator = "hyperfleet-operator"
-	partOfHyperfleet  = "hyperfleet"
-
 	// The http port serves only /healthz and /readyz; Sentinel is an outbound
 	// poller, not a request handler.
 	portNameHTTP    = "http"
@@ -57,15 +55,6 @@ const (
 
 	brokerSecretEnv = "BROKER_RABBITMQ_URL"
 	brokerConfigEnv = "BROKER_CONFIG_FILE"
-)
-
-// Label keys, declared once to keep the common and selector sets in sync.
-const (
-	labelName      = "app.kubernetes.io/name"
-	labelInstance  = "app.kubernetes.io/instance"
-	labelComponent = "app.kubernetes.io/component"
-	labelPartOf    = "app.kubernetes.io/part-of"
-	labelManagedBy = "app.kubernetes.io/managed-by"
 )
 
 // ResourceName is the metadata.name of a resource type's non-ConfigMap operands.
@@ -89,27 +78,9 @@ func componentName(resourceType string) string {
 	return ComponentName + "-" + resourceType
 }
 
-func labels(crName, resourceType string) map[string]string {
+func identity(crName, resourceType string) component.Identity {
 	name := componentName(resourceType)
-	return map[string]string{
-		labelName:      name,
-		labelInstance:  crName,
-		labelComponent: name,
-		labelPartOf:    partOfHyperfleet,
-		labelManagedBy: managedByOperator,
-	}
-}
-
-// selectorLabels is the immutable subset used by the Deployment selector, pod
-// template and NetworkPolicy; a Deployment selector cannot change after
-// creation.
-func selectorLabels(crName, resourceType string) map[string]string {
-	name := componentName(resourceType)
-	return map[string]string{
-		labelName:      name,
-		labelInstance:  crName,
-		labelComponent: name,
-	}
+	return component.Identity{Name: name, Component: name, Instance: crName}
 }
 
 func containerResources() corev1.ResourceRequirements {
@@ -210,15 +181,11 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace, resou
 	})
 
 	return &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    labels(cr.Name, resourceType),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+		ObjectMeta: identity(cr.Name, resourceType).ObjectMeta(name, namespace),
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To[int32](1),
-			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels(cr.Name, resourceType)},
+			Selector: &metav1.LabelSelector{MatchLabels: identity(cr.Name, resourceType).SelectorLabels()},
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -227,7 +194,7 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace, resou
 				},
 			},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels(cr.Name, resourceType)},
+				ObjectMeta: metav1.ObjectMeta{Labels: identity(cr.Name, resourceType).Labels()},
 				Spec: corev1.PodSpec{
 					// Sentinel never calls the Kubernetes API, so no
 					// service-account token is needed.
@@ -278,12 +245,8 @@ func deployment(cr *hyperfleetv1alpha1.HyperFleetConfig, image, namespace, resou
 
 func serviceAccount(crName, namespace, resourceType string) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName(resourceType),
-			Namespace: namespace,
-			Labels:    labels(crName, resourceType),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
+		ObjectMeta: identity(crName, resourceType).ObjectMeta(ResourceName(resourceType), namespace),
 	}
 }
 
@@ -291,12 +254,8 @@ func serviceAccount(crName, namespace, resourceType string) *corev1.ServiceAccou
 // hashes.
 func configMap(crName, namespace, resourceType, configYAML string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ConfigMapName(resourceType),
-			Namespace: namespace,
-			Labels:    labels(crName, resourceType),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: identity(crName, resourceType).ObjectMeta(ConfigMapName(resourceType), namespace),
 		Data: map[string]string{
 			ConfigFileKey: configYAML,
 		},
@@ -306,12 +265,8 @@ func configMap(crName, namespace, resourceType, configYAML string) *corev1.Confi
 // brokerConfigMap holds the rendered broker.yaml.
 func brokerConfigMap(crName, namespace, resourceType, brokerYAML string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      BrokerConfigMapName(resourceType),
-			Namespace: namespace,
-			Labels:    labels(crName, resourceType),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: identity(crName, resourceType).ObjectMeta(BrokerConfigMapName(resourceType), namespace),
 		Data: map[string]string{
 			BrokerConfigFileKey: brokerYAML,
 		},
@@ -330,14 +285,10 @@ func audienceForToken(cr *hyperfleetv1alpha1.HyperFleetConfig) string {
 // cross-namespace or external.
 func networkPolicy(crName, namespace, resourceType string) *networkingv1.NetworkPolicy {
 	return &networkingv1.NetworkPolicy{
-		TypeMeta: metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ResourceName(resourceType),
-			Namespace: namespace,
-			Labels:    labels(crName, resourceType),
-		},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
+		ObjectMeta: identity(crName, resourceType).ObjectMeta(ResourceName(resourceType), namespace),
 		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{MatchLabels: selectorLabels(crName, resourceType)},
+			PodSelector: metav1.LabelSelector{MatchLabels: identity(crName, resourceType).SelectorLabels()},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 			Ingress:     []networkingv1.NetworkPolicyIngressRule{},
 		},

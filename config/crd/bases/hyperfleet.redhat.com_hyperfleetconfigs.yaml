@@ -203,7 +203,7 @@ spec:
                               value:
                                 description: value is a fixed dimension value for
                                   this provider. Mutually exclusive with claim. Use
-                                  for identity domains where claims are untrusted.
+                                  it when the provider's claims cannot be trusted.
                                   This field name and its semantics are a v1alpha1
                                   compatibility commitment.
                                 maxLength: 255
@@ -217,10 +217,11 @@ spec:
                                 || size(self.value) == 0)) || ((!has(self.claim) ||
                                 size(self.claim) == 0) && has(self.value) && size(self.value)
                                 != 0)
-                          description: tenantDimensions overrides the source of each
-                            tenant dimension for this provider. Unlisted dimensions
-                            use the bundle preset. This field name and its semantics
-                            are a v1alpha1 compatibility commitment.
+                          description: tenantDimensions sets the source of each tenant
+                            dimension for this provider. A dimension not listed here
+                            uses the bundle preset, which reads the claim from the
+                            token as is. This field name and its semantics are a v1alpha1
+                            compatibility commitment.
                           maxProperties: 8
                           type: object
                           x-kubernetes-validations:

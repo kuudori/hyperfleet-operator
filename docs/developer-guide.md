@@ -13,7 +13,7 @@ not duplicated here.
 
 ## Prerequisites
 
-- Go 1.26.0, matching `go.mod`. Make defaults to `GOTOOLCHAIN=go1.26.0`, while honoring an explicit environment or command-line override. For direct `go` commands on a newer toolchain, use the same prefix; the pinned golangci-lint does not support Go 1.27.
+- Go 1.26.7, matching `go.mod`. Make defaults to `GOTOOLCHAIN=go1.26.7`, while honoring an explicit environment or command-line override. For direct `go` commands on a newer toolchain, use the same prefix; the pinned golangci-lint does not support Go 1.27.
 - FIPS mode is enabled only in the manager container image. Local builds and
   tests do not enable it by default. The Dockerfile selects `GOFIPS140=v1.0.0`
   and builds the whole `./cmd` package with `-tags=fips,no_openssl` so that

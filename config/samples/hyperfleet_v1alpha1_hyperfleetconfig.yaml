@@ -24,7 +24,10 @@ spec:
     audience: hyperfleet-api
     identityProviders:
       - issuer: https://idcs-example.identity.oraclecloud.com
-        # identityClaim and tenantDimensions are per-provider overrides.
+        # identityClaim and tenantDimensions are per-provider overrides. A
+        # dimension not listed here uses the bundle preset: the token claim of
+        # the same name is trusted as is. Use value when the provider's claims
+        # are not trusted.
         tenantDimensions:
           tenancy_ocid:
             claim: tenancy_ocid

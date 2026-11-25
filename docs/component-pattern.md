@@ -43,6 +43,14 @@ namespaces, labels/selectors, and deterministic ordering. The controller adds
 the `HyperFleetConfig` controller owner reference and applies objects with
 server-side apply and force ownership.
 
+Derive every operand's labels, selectors, and `ObjectMeta` from one
+`component.Identity` (`internal/component/metadata.go`) rather than spelling the
+`app.kubernetes.io/*` labels out per component. `Labels()` is the full set for
+object and pod-template metadata; `SelectorLabels()` is the immutable subset for
+Deployment, Service, and NetworkPolicy selectors, which cannot change after
+creation. The identity's `Component` value is the stable component name used in
+the `operand` metric label.
+
 `Conditions` is also cluster-I/O-free. `internal/apply.Objects` refreshes the
 rendered objects in place after applying them, so this method must derive health
 from the supplied `applied` slice. It should return the component-level

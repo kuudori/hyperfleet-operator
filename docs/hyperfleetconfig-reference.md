@@ -13,6 +13,7 @@ The generated CRD remains the admission-time source of truth.
   - [TLS port advertisement](#tls-port-advertisement)
   - [Referenced Secret contracts](#referenced-secret-contracts)
   - [Identity providers](#identity-providers)
+  - [Tenant dimensions](#tenant-dimensions)
   - [Current sizing limitation](#current-sizing-limitation)
 - [Status reference](#status-reference)
   - [Operator conditions versus API resource conditions](#operator-conditions-versus-api-resource-conditions)
@@ -88,7 +89,7 @@ configuration can change it.
 | `spec.authentication.identityProviders` | Yes | None | Map-list keyed by `issuer`, 1 to 64 entries, duplicates rejected. |
 | `spec.authentication.identityProviders[].issuer` | Yes | None | HTTPS URL, host, no `?`/`#`/trailing `/`, 1 to 2048 chars. |
 | `spec.authentication.identityProviders[].identityClaim` | No | `sub` | Claim naming caller, `^[A-Za-z0-9._-]+$`, 1 to 128 chars. |
-| `spec.authentication.identityProviders[].tenantDimensions` | No | Preset defaults | Per-dimension source: exactly one of `claim` or `value`. Dimension name `^[A-Za-z0-9._-]{1,63}$`. |
+| `spec.authentication.identityProviders[].tenantDimensions` | No | Bundle preset | Per-dimension source: exactly one of `claim` or `value`. A dimension not listed uses the bundle preset, which trusts the token claim of the same name; see [tenant dimensions](#tenant-dimensions). Dimension name `^[A-Za-z0-9._-]{1,63}$`. |
 | `spec.authentication.identityProviders[].tenantDimensions[dim].claim` | Conditional | None | Claim name, `^[A-Za-z0-9._-]+$`, 1 to 256 chars. |
 | `spec.authentication.identityProviders[].tenantDimensions[dim].value` | Conditional | None | Fixed value, `^[A-Za-z0-9._-]+$`, 1 to 255 chars. |
 
@@ -146,12 +147,68 @@ off. It declares the default audience and the accepted identity providers:
 - `identityProviders` lists the accepted issuers (1-64, keyed by `issuer`).
   For each tenant dimension, set exactly one of `claim` (JWT claim name) or
   `value` (fixed string); dimensions an entry does not list fall back to the
-  bundle preset.
+  bundle preset, which reads the token's claim as is (see
+  [tenant dimensions](#tenant-dimensions)).
 
 These fields are validated at admission but not enforced yet: the API itself
 runs without JWT validation, so listing an identity provider does not yet
 authenticate API requests. HYPERFLEET-1534 consumes this configuration and
 turns enforcement on.
+
+### Tenant dimensions
+
+A tenant dimension is one part of the tenant the API scopes a caller to. The
+bundle decides which dimensions exist, and the gateway copies each one into the
+signed token the API trusts:
+
+| Bundle | Dimension key | Preset claim | Required |
+|---|---|---|---|
+| `cloud-capi` | `tenancy_ocid` | `tenancy_ocid` | Yes |
+| `cloud-capi` | `compartment_id` | `compartment_id` | No |
+| `onprem-agent` | `org` | `org_id` | Yes |
+| `onprem-agent` | `project` | `project_id` | No |
+
+The presets are defined in `internal/tenant/tenant.go`; the table must match it.
+
+Each provider gets its value for a dimension from, in order:
+
+1. `value`: the fixed string you set. A token cannot override it, even if it
+   carries a claim of the same name.
+2. `claim`: the token claim you name. A name other than the preset claim is
+   mapped onto it.
+3. **Nothing listed: the bundle preset.** The gateway takes the token's claim
+   named in the *Preset claim* column as is. **The operator does not check or
+   fix that value**; whoever can put that claim into a token issued by this
+   provider chooses the tenant.
+
+A missing required claim makes the gateway reject the request for human
+callers. A missing optional claim leaves that dimension empty, so the API scopes
+that caller by its remaining dimensions only and it matches resources in every
+value of the missing one. That broader visibility is a supported capability
+([ADR-0027](https://github.com/openshift-hyperfleet/architecture/blob/main/hyperfleet/adrs/0027-tenant-dimension-cardinality.md)),
+so only let a provider omit an optional claim if it may grant that wider scope.
+
+A dimension claim must be a single string. If the token carries anything else
+for it, such as an array from a groups claim mapped onto a dimension, the
+gateway denies the request: there is no safe way to pick one value. Map a
+single-valued claim, or set `value`.
+
+Trusting the preset claim is right only when the provider's administrators
+cannot set it themselves, for example a claim the identity service fills in.
+For an identity provider whose claims you do not control, set `value` for
+**every** dimension you care about, at least the required one:
+
+```yaml
+identityProviders:
+  - issuer: https://untrusted.idp.example.com
+    tenantDimensions:
+      tenancy_ocid:
+        value: tenant-a   # fixed; the token's tenancy_ocid is ignored
+```
+
+A dimension key that is not in the table for the bundle is an error when the
+gateway configuration is rendered, so a misspelled key cannot silently fall back
+to the preset.
 
 ### Current sizing limitation
 

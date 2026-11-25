@@ -188,7 +188,7 @@ type TenantDimensionSource struct {
 	// +optional
 	Claim string `json:"claim,omitempty"`
 
-	// value is a fixed dimension value for this provider. Mutually exclusive with claim. Use for identity domains where claims are untrusted. This field name and its semantics are a v1alpha1 compatibility commitment.
+	// value is a fixed dimension value for this provider. Mutually exclusive with claim. Use it when the provider's claims cannot be trusted. This field name and its semantics are a v1alpha1 compatibility commitment.
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=255
@@ -218,7 +218,7 @@ type IdentityProvider struct {
 	// +optional
 	IdentityClaim string `json:"identityClaim,omitempty"`
 
-	// tenantDimensions overrides the source of each tenant dimension for this provider. Unlisted dimensions use the bundle preset. This field name and its semantics are a v1alpha1 compatibility commitment.
+	// tenantDimensions sets the source of each tenant dimension for this provider. A dimension not listed here uses the bundle preset, which reads the claim from the token as is. This field name and its semantics are a v1alpha1 compatibility commitment.
 	//
 	// +kubebuilder:validation:MaxProperties=8
 	// +kubebuilder:validation:XValidation:rule="self.all(x, x.matches('^[A-Za-z0-9._-]{1,63}$'))",message="dimension name must match ^[A-Za-z0-9._-]{1,63}$"
